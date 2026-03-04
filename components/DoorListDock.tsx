@@ -19,6 +19,14 @@ function SearchIcon() {
   )
 }
 
+function FilterIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+    </svg>
+  )
+}
+
 const COLS: Array<{ key: ColKey; min: number; initial: number }> = [
   { key: 'check', min: 24, initial: 24 },
   { key: 'door', min: 140, initial: 260 },
@@ -334,7 +342,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'door' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'door' ? null : 'door')}>
-                  <span className="label-text">Türnummer</span>
+                  <span className="header-label-wrap">
+                    {doorFilter.trim() !== '' && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">Türnummer</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'door' && (
@@ -352,7 +367,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'type' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'type' ? null : 'type')}>
-                  <span className="label-text">Geometrietyp</span>
+                  <span className="header-label-wrap">
+                    {typeFilterSet.size > 0 && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">Geometrietyp</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'type' && (
@@ -375,7 +397,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'storey' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'storey' ? null : 'storey')}>
-                  <span className="label-text">Geschoss</span>
+                  <span className="header-label-wrap">
+                    {storeyFilterSet.size > 0 && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">Geschoss</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'storey' && (
@@ -398,7 +427,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'brandschutz' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'brandschutz' ? null : 'brandschutz')}>
-                  <span className="label-text">Brandschutz</span>
+                  <span className="header-label-wrap">
+                    {brandschutzFilterSet.size > 0 && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">Brandschutz</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'brandschutz' && (
@@ -421,7 +457,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'schallschutz' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'schallschutz' ? null : 'schallschutz')}>
-                  <span className="label-text">Schallschutz</span>
+                  <span className="header-label-wrap">
+                    {schallschutzFilterSet.size > 0 && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">Schallschutz</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'schallschutz' && (
@@ -444,7 +487,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'lb' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'lb' ? null : 'lb')}>
-                  <span className="label-text">LB</span>
+                  <span className="header-label-wrap">
+                    {lbFilter.trim() !== '' && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">LB</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'lb' && (
@@ -461,7 +511,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'lh' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'lh' ? null : 'lh')}>
-                  <span className="label-text">LH</span>
+                  <span className="header-label-wrap">
+                    {lhFilter.trim() !== '' && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">LH</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'lh' && (
@@ -478,7 +535,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'rb' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'rb' ? null : 'rb')}>
-                  <span className="label-text">RB</span>
+                  <span className="header-label-wrap">
+                    {rbFilter.trim() !== '' && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">RB</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'rb' && (
@@ -495,7 +559,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'rh' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'rh' ? null : 'rh')}>
-                  <span className="label-text">RH</span>
+                  <span className="header-label-wrap">
+                    {rhFilter.trim() !== '' && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">RH</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'rh' && (
@@ -512,7 +583,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'bram' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'bram' ? null : 'bram')}>
-                  <span className="label-text">BRAM</span>
+                  <span className="header-label-wrap">
+                    {bramFilter.trim() !== '' && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">BRAM</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'bram' && (
@@ -529,7 +607,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'hram' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'hram' ? null : 'hram')}>
-                  <span className="label-text">HRAM</span>
+                  <span className="header-label-wrap">
+                    {hramFilter.trim() !== '' && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">HRAM</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'hram' && (
@@ -559,7 +644,14 @@ export default function DoorListDock({
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'guid' ? dropdownRef : undefined}>
               <div className="header-row">
                 <button className="list-header-button" onClick={() => setDropdownOpenKey(k => k === 'guid' ? null : 'guid')}>
-                  <span className="label-text">GUID</span>
+                  <span className="header-label-wrap">
+                    {guidFilter.trim() !== '' && (
+                      <span className="header-filter-icon" title="Filter aktiv">
+                        <FilterIcon />
+                      </span>
+                    )}
+                    <span className="label-text">GUID</span>
+                  </span>
                 </button>
               </div>
               {dropdownOpenKey === 'guid' && (
@@ -721,6 +813,21 @@ export default function DoorListDock({
           overflow: hidden;
           text-overflow: ellipsis;
           white-space: nowrap;
+        }
+
+        .header-label-wrap {
+          display: flex;
+          align-items: center;
+          gap: 4px;
+          min-width: 0;
+        }
+
+        .header-filter-icon {
+          flex-shrink: 0;
+          color: #fff;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
         }
 
         .header-row {
