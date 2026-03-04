@@ -283,15 +283,15 @@ function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nom
         target.massDurchgangsbreite = parseIfcNumber(nominalValue)
         return
     }
-    if (normalized === 'massdurchgangshoehe') {
+    if (normalized === 'lh') {
         target.massDurchgangshoehe = parseIfcNumber(nominalValue)
         return
     }
-    if (normalized === 'massrohbreite' || normalized === 'massrohebreite') {
+    if (normalized === 'rb') {
         target.massRohbreite = parseIfcNumber(nominalValue)
         return
     }
-    if (normalized === 'massrohhoehe' || normalized === 'massrohehoehe') {
+    if (normalized === 'rh') {
         target.massRohhoehe = parseIfcNumber(nominalValue)
         return
     }

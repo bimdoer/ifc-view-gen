@@ -112,11 +112,11 @@ function setCsetProperty(target: CsetStandardCH, propertyName: string, rawValue:
         }
     } else if (normalized === 'massdurchgangsbreite') {
         target.massDurchgangsbreite = parseIfcNumber(rawValue)
-    } else if (normalized === 'massdurchgangshoehe') {
+    } else if (normalized === 'lh') {
         target.massDurchgangshoehe = parseIfcNumber(rawValue)
-    } else if (normalized === 'massrohbreite' || normalized === 'massrohebreite') {
+    } else if (normalized === 'rb') {
         target.massRohbreite = parseIfcNumber(rawValue)
-    } else if (normalized === 'massrohhoehe' || normalized === 'massrohehoehe') {
+    } else if (normalized === 'rh') {
         target.massRohhoehe = parseIfcNumber(rawValue)
     } else if (normalized === 'massaussenrahmenbreite') {
         target.massAussenrahmenBreite = parseIfcNumber(rawValue)
