@@ -359,13 +359,21 @@ export class NavigationManager {
     const fov = this.camera.fov * (Math.PI / 180)
     const distance = (maxDim * padding) / (2 * Math.tan(fov / 2))
 
-    // Position camera along the normal direction
-    const cameraPos = center.clone().add(normal.clone().multiplyScalar(distance))
+    // make sure normal is horizontal
+    const n = normal.clone()
+    n.y = 0
 
-    // Ensure camera is not below ground
-    if (cameraPos.y < 0.5) {
-      cameraPos.y = 0.5
+    if (n.lengthSq() < 1e-10) {
+      n.set(0, 0, 1) // fallback direction
     }
+
+    n.normalize()
+
+    // position camera along horizontal normal
+    const cameraPos = center.clone().addScaledVector(n, distance)
+
+    // ensure horizontal viewing direction
+    cameraPos.y = center.y
 
     this.controls.setLookAt(
       cameraPos.x,
