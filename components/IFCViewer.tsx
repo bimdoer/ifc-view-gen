@@ -890,12 +890,7 @@ export default function IFCViewer() {
             </div>
           </div>
 
-          {error && <div className="error-message">{error}</div>}
-          {doorContexts.length > 0 && (
-            <div className="door-count">
-              Found {doorContexts.length} door{doorContexts.length !== 1 ? 's' : ''}
-            </div>
-          )}
+
         </div>
       )}
       <div className="viewer-layout" style={{ position: 'relative' }}>
