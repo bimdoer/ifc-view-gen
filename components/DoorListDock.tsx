@@ -1,5 +1,6 @@
 'use client'
 
+import { useMemo, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
 
@@ -56,8 +57,40 @@ export default function DoorListDock({
   dockRightOffsetPx = 400,
   listContainerRef,
 }: DoorListDockProps) {
-  const visibleDoors = doors.slice(0, maxItems)
-  const remaining = Math.max(0, doors.length - visibleDoors.length)
+   const [doorFilter, setDoorFilter] = useState('')
+   const [typeFilter, setTypeFilter] = useState('')
+   const [storeyFilter, setStoreyFilter] = useState('')
+ 
+   const filteredDoors = useMemo(() => {
+     const d = doorFilter.trim().toLowerCase()
+     const t = typeFilter.trim().toLowerCase()
+     const s = storeyFilter.trim().toLowerCase()
+ 
+     return doors.filter(door => {
+       if (d) {
+         const label = getDoorLabel(door).toLowerCase()
+         if (!label.includes(d)) return false
+       }
+       if (t) {
+         const type = (door.doorTypeName || '').toLowerCase()
+         if (!type.includes(t)) return false
+       }
+       if (s) {
+         const storey = (door.storeyName || '').toLowerCase()
+         if (!storey.includes(s)) return false
+       }
+       return true
+     })
+   }, [doors, doorFilter, getDoorLabel, storeyFilter, typeFilter])
+ 
+   const visibleDoors = filteredDoors.slice(0, maxItems)
+   const remaining = Math.max(0, filteredDoors.length - visibleDoors.length)
+ 
+   const clearLocalFilters = () => {
+     setDoorFilter('')
+     setTypeFilter('')
+     setStoreyFilter('')
+   }
 
   return (
     <div
@@ -72,7 +105,7 @@ export default function DoorListDock({
       }
       ref={listContainerRef as any}
     >
-      {doors.length === 0 ? (
+      {filteredDoors.length === 0 ? (
         <div className="empty-state">
           <p>No doors match your filters</p>
           {hasActiveFilters && onClearFilters && (
@@ -85,20 +118,53 @@ export default function DoorListDock({
         <>
           <div className="door-list-header">
             <span />
-            <button className="list-header-button" onClick={() => onToggleSort('door')}>
-              <span className="label-text">Door</span>
-              <span className="sort-indicator">{sortIndicator('door')}</span>
-            </button>
-            <button className="list-header-button" onClick={() => onToggleSort('type')}>
-              <span className="label-text">Type</span>
-              <span className="sort-indicator">{sortIndicator('type')}</span>
-            </button>
-            <button className="list-header-button" onClick={() => onToggleSort('storey')}>
-              <span className="label-text">Storey</span>
-              <span className="sort-indicator">{sortIndicator('storey')}</span>
-            </button>
-            <span>Views</span>
-          </div>
+
+            <div className="header-col">
+                <button className="list-header-button" onClick={() => onToggleSort('door')}>
+                <span className="label-text">Door</span>
+                <span className="sort-indicator">{sortIndicator('door')}</span>
+                </button>
+                <input
+                className="header-filter"
+                placeholder="Filter…"
+                value={doorFilter}
+                onChange={(e) => setDoorFilter(e.target.value)}
+                />
+            </div>
+
+            <div className="header-col">
+                <button className="list-header-button" onClick={() => onToggleSort('type')}>
+                <span className="label-text">Type</span>
+                <span className="sort-indicator">{sortIndicator('type')}</span>
+                </button>
+                <input
+                className="header-filter"
+                placeholder="Filter…"
+                value={typeFilter}
+                onChange={(e) => setTypeFilter(e.target.value)}
+                />
+            </div>
+
+            <div className="header-col">
+                <button className="list-header-button" onClick={() => onToggleSort('storey')}>
+                <span className="label-text">Storey</span>
+                <span className="sort-indicator">{sortIndicator('storey')}</span>
+                </button>
+                <input
+                className="header-filter"
+                placeholder="Filter…"
+                value={storeyFilter}
+                onChange={(e) => setStoreyFilter(e.target.value)}
+                />
+            </div>
+
+            <div className="header-col views-col">
+                <span>Views</span>
+                <button className="clear-header-filters" onClick={clearLocalFilters} title="Clear filters">
+                ×
+                </button>
+            </div>
+            </div>
 
           {visibleDoors.map((door) => (
             <div
@@ -189,10 +255,6 @@ export default function DoorListDock({
           position: sticky;
           top: 0;
           z-index: 5;
-        }
-
-        .door-list-header > span:last-child {
-          text-align: center;
         }
 
         .list-header-button {
@@ -382,6 +444,48 @@ export default function DoorListDock({
         .text-button:hover {
           background: #333;
           color: #fff;
+        }
+
+        .header-col {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          min-width: 0;
+        }
+
+        .header-filter {
+          width: 100%;
+          height: 22px;
+          padding: 2px 6px;
+          background: #141414;
+          border: 1px solid #333;
+          border-radius: 6px;
+          color: #e5e7eb;
+          font-size: 11px;
+        }
+
+        .header-filter:focus {
+          outline: none;
+          border-color: #4ecdc4;
+        }
+
+        .views-col {
+          align-items: center;
+        }
+
+        .clear-header-filters {
+          width: 22px;
+          height: 22px;
+          border-radius: 6px;
+          border: 1px solid #333;
+          background: #141414;
+          color: #9ca3af;
+          cursor: pointer;
+        }
+
+        .clear-header-filters:hover {
+          color: #fff;
+          border-color: #555;
         }
       `}</style>
     </div>
