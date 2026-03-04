@@ -857,23 +857,28 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         }
         .image-modal-body {
           flex: 1;
-          overflow: auto;
+          min-height: 0;
+          overflow: hidden;
           padding: 2rem;
           background: #fff;
-          min-height: 0;
           display: flex;
-          align-items: flex-start;
+          align-items: center;
           justify-content: center;
         }
         .image-container {
-          display: inline-block;
-          max-width: 100%;
+          flex: 1;
+          min-height: 0;
+          display: flex;
+          align-items: center;
+          justify-content: center;
         }
         .image-container svg {
           display: block;
           max-width: 100%;
+          max-height: 100%;
           width: auto;
           height: auto;
+          object-fit: contain;
         }
         .image-modal-footer {
           display: flex;

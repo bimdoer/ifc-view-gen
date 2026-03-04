@@ -32,6 +32,7 @@ export default function IFCViewer() {
   const electricalModelRef = useRef<any>(null)
   const archFileRef = useRef<File | null>(null) // Store arch file for detailed geometry extraction
   const modelCenterOffsetRef = useRef<THREE.Vector3>(new THREE.Vector3()) // Store centering offset
+  const dockShowSingleDoorRef = useRef<((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null>(null)
 
   const [isLoading, setIsLoading] = useState(false)
   const [loadingProgress, setLoadingProgress] = useState(0)
@@ -145,8 +146,12 @@ export default function IFCViewer() {
     nav.zoomToElementFromNormal(door.door.boundingBox, door.normal, 2.5)
   }, [])
 
-  const handleDockShowSingleDoor = useCallback((_door: DoorContext, _view: 'front' | 'back' | 'plan') => {
-    // TODO: optional preview implementation later
+  const handleDockShowSingleDoorReady = useCallback((fn: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => {
+    dockShowSingleDoorRef.current = fn
+  }, [])
+
+  const handleDockShowSingleDoor = useCallback((door: DoorContext, view: 'front' | 'back' | 'plan') => {
+    dockShowSingleDoorRef.current?.(door, view)
   }, [])
 
   // Sync DoorListDock checkbox selection to 3D view: selected highlighted, rest dimmed
@@ -1043,6 +1048,7 @@ export default function IFCViewer() {
               onComplete={() => {
                 // Optional callback when export completes
               }}
+              onShowSingleDoorReady={handleDockShowSingleDoorReady}
             />
           </div>
         )}

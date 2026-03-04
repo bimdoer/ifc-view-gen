@@ -24,6 +24,7 @@ interface DoorPanelProps {
   navigationManager: NavigationManager | null
   modelSource?: string
   onComplete?: () => void
+  onShowSingleDoorReady?: (showSingleDoor: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => void
 }
 
 interface AirtableStatus {
@@ -36,6 +37,7 @@ export default function DoorPanel({
   navigationManager,
   modelSource,
   onComplete,
+  onShowSingleDoorReady,
 }: DoorPanelProps) {
   // Filter state
   const [searchQuery, setSearchQuery] = useState('')
@@ -358,6 +360,11 @@ export default function DoorPanel({
     },
     [options]
   )
+
+  useEffect(() => {
+    onShowSingleDoorReady?.(showSingleDoor)
+    return () => { onShowSingleDoorReady?.(null) }
+  }, [showSingleDoor, onShowSingleDoorReady])
 
   // Download ZIP
   const performDownload = useCallback(async () => {
@@ -1742,15 +1749,22 @@ export default function DoorPanel({
 
         .image-modal-body {
           flex: 1;
-          overflow: auto;
+          min-height: 0;
+          overflow: hidden;
           padding: 20px;
           background: #fff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
         }
 
         .image-modal-body :global(svg) {
           display: block;
           max-width: 100%;
+          max-height: 100%;
+          width: auto;
           height: auto;
+          object-fit: contain;
         }
 
         .image-modal-footer {
