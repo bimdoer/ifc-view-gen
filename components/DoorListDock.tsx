@@ -276,6 +276,25 @@ export default function DoorListDock({
    type DropdownCol = SortField
    const [dropdownOpenKey, setDropdownOpenKey] = useState<DropdownCol | null>(null)
    const dropdownRef = useRef<HTMLDivElement>(null)
+   const headerCheckboxRef = useRef<HTMLInputElement>(null)
+
+   const allVisibleSelected = visibleDoors.length > 0 && visibleDoors.every(d => selectedDoorIds.has(d.doorId))
+   const someVisibleSelected = visibleDoors.some(d => selectedDoorIds.has(d.doorId))
+
+   const onHeaderCheckboxChange = useCallback(() => {
+     if (allVisibleSelected) {
+       visibleDoors.forEach(d => onToggleSelect(d.doorId))
+     } else {
+       visibleDoors.forEach(d => {
+         if (!selectedDoorIds.has(d.doorId)) onToggleSelect(d.doorId)
+       })
+     }
+   }, [allVisibleSelected, visibleDoors, selectedDoorIds, onToggleSelect])
+
+   useEffect(() => {
+     const el = headerCheckboxRef.current
+     if (el) el.indeterminate = someVisibleSelected && !allVisibleSelected
+   }, [someVisibleSelected, allVisibleSelected])
 
    useEffect(() => {
      if (!dropdownOpenKey) return
@@ -337,7 +356,20 @@ export default function DoorListDock({
       ) : (
         <div className="door-list-scroll" style={{ minWidth: totalWidth }}>
           <div className="door-list-header" style={{ gridTemplateColumns: gridTemplate }}>
-            <div className="header-col header-col-checkbox" />
+            <div className="header-col header-col-checkbox">
+              <div className="header-row">
+                <label className="door-checkbox">
+                  <input
+                    ref={headerCheckboxRef}
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    disabled={visibleDoors.length === 0}
+                    onChange={onHeaderCheckboxChange}
+                  />
+                  <span className="checkmark" />
+                </label>
+              </div>
+            </div>
 
             <div className="header-col header-resizable" ref={dropdownOpenKey === 'door' ? dropdownRef : undefined}>
               <div className="header-row">
@@ -776,7 +808,7 @@ export default function DoorListDock({
         .door-list-header {
           display: grid;
           gap: 6px;
-          padding: 8px 12px;
+          padding: 5px 12px;
           background: #1d1d1d;
           border-bottom: 1px solid #303030;
           font-size: 11px;
@@ -969,6 +1001,7 @@ export default function DoorListDock({
           display: inline-flex;
           align-items: center;
           justify-content: center;
+          cursor: pointer;
         }
 
         .door-checkbox input {
@@ -1115,6 +1148,15 @@ export default function DoorListDock({
           gap: 6px;
           min-width: 0;
           min-height: 22px;
+          justify-content: center;
+        }
+
+        .header-col-checkbox {
+          min-height: 36px;
+        }
+
+        .header-col-checkbox .header-row {
+          justify-content: center;
         }
 
 
