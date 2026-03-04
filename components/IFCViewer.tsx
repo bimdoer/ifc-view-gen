@@ -834,63 +834,83 @@ export default function IFCViewer() {
       {/* Top menu - only show when model is loaded */}
       {modelLoaded && (
         <div className="controls">
-          {/* Subtle logo with door opening animation */}
-          <div
-            className="logo-container"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              marginRight: '16px',
-              cursor: 'default',
+          <div className="controls-left">
+            {/* Subtle logo with door opening animation */}
+            <div
+              className="logo-container"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                marginRight: '16px',
+                cursor: 'default',
+              }}
+            >
+              <svg
+                width="28"
+                height="28"
+                viewBox="0 0 100 100"
+                style={{ display: 'block' }}
+              >
+                {/* Door frame */}
+                <rect x="20" y="10" width="60" height="80" fill="none" stroke="#4a5568" strokeWidth="2.5" strokeLinecap="round" />
+
+                {/* Door panel - will rotate on hover (hinge at left edge x=25) */}
+                <g className="door-panel">
+                  <rect x="25" y="15" width="50" height="70" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" strokeWidth="2" />
+                  <circle cx="70" cy="50" r="3" fill="#3b82f6" opacity="0.4" />
+                </g>
+              </svg>
+            </div>
+            <div className="file-inputs">
+              <div className="input-group">
+                <label htmlFor="ifc-file-input" className="file-input-label">
+                  {isLoading ? 'Loading...' : (archFileName || '1. Select Architectural IFC')}
+                </label>
+                <input
+                  id="ifc-file-input"
+                  type="file"
+                  accept=".ifc"
+                  onChange={(e) => handleFileChange(e, 'arch')}
+                  disabled={isLoading}
+                  className="file-input"
+                />
+              </div>
+
+              <div className="input-group">
+                <label htmlFor="elec-file-input" className="file-input-label secondary">
+                  {isLoading ? 'Loading...' : (elecFileName || '2. Select Electrical IFC (Optional)')}
+                </label>
+                <input
+                  id="elec-file-input"
+                  type="file"
+                  accept=".ifc"
+                  onChange={(e) => handleFileChange(e, 'elec')}
+                  disabled={isLoading}
+                  className="file-input"
+                />
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="header-shortcuts-btn"
+            title="Keyboard shortcuts"
+            onClick={() => {
+              alert(`Keyboard Shortcuts:
+
+Views:
+  1-7 — View presets (Top, Bottom, Front, Back, Left, 3D)
+  Z — Zoom window
+
+Section:
+  R — Reset / Show full model
+  Shift — Hold for horizontal/vertical constraint
+  F — Flip section direction
+  ESC — Cancel section drawing`)
             }}
           >
-            <svg
-              width="28"
-              height="28"
-              viewBox="0 0 100 100"
-              style={{ display: 'block' }}
-            >
-              {/* Door frame */}
-              <rect x="20" y="10" width="60" height="80" fill="none" stroke="#4a5568" strokeWidth="2.5" strokeLinecap="round" />
-
-              {/* Door panel - will rotate on hover (hinge at left edge x=25) */}
-              <g className="door-panel">
-                <rect x="25" y="15" width="50" height="70" fill="#3b82f6" opacity="0.15" stroke="#3b82f6" strokeWidth="2" />
-                <circle cx="70" cy="50" r="3" fill="#3b82f6" opacity="0.4" />
-              </g>
-            </svg>
-          </div>
-          <div className="file-inputs">
-            <div className="input-group">
-              <label htmlFor="ifc-file-input" className="file-input-label">
-                {isLoading ? 'Loading...' : (archFileName || '1. Select Architectural IFC')}
-              </label>
-              <input
-                id="ifc-file-input"
-                type="file"
-                accept=".ifc"
-                onChange={(e) => handleFileChange(e, 'arch')}
-                disabled={isLoading}
-                className="file-input"
-              />
-            </div>
-
-            <div className="input-group">
-              <label htmlFor="elec-file-input" className="file-input-label secondary">
-                {isLoading ? 'Loading...' : (elecFileName || '2. Select Electrical IFC (Optional)')}
-              </label>
-              <input
-                id="elec-file-input"
-                type="file"
-                accept=".ifc"
-                onChange={(e) => handleFileChange(e, 'elec')}
-                disabled={isLoading}
-                className="file-input"
-              />
-            </div>
-          </div>
-
-
+            ?
+          </button>
         </div>
       )}
       <div className="viewer-layout" style={{ position: 'relative' }}>
@@ -1178,8 +1198,8 @@ export default function IFCViewer() {
         .file-inputs {
             display: flex;
             gap: 1rem;
-            margin-bottom: 0.5rem;
-            align-items: flex-start;
+            
+            align-items: center;
         }
         .input-group {
             display: flex;
