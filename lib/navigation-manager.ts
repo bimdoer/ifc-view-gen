@@ -59,8 +59,9 @@ export class NavigationManager {
     this.controls.mouseButtons.right = CameraControls.ACTION.TRUCK
     this.controls.mouseButtons.middle = CameraControls.ACTION.TRUCK
 
-    // Smooth transitions
-    this.controls.smoothTime = 0.25
+    // Smooth transitions – higher value = gentler deceleration at end of zoom
+    this.controls.smoothTime = 0.45
+    this.controls.restThreshold = 0.005
 
     // Set up update callback
     this.controls.addEventListener('control', () => {
