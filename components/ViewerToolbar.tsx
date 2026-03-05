@@ -60,6 +60,18 @@ function ArrowUpIcon({ size = 20 }: { size?: number }) {
     )
 }
 
+function CenterIcon({ size = 20 }: { size?: number }) {
+    return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M12 2v4" />
+            <path d="M12 18v4" />
+            <path d="M2 12h4" />
+            <path d="M18 12h4" />
+        </svg>
+    )
+}
+
 const roundButtonStyle = (active: boolean) => ({
     width: '40px',
     height: '40px',
@@ -143,17 +155,37 @@ export default function ViewerToolbar({
                 </button>
             )}
 
-            <button
-                onClick={handleScissorsClick}
-                title="Section"
+            <div
                 style={{
-                    ...roundButtonStyle(isActive),
-                    width: '48px',
-                    height: '48px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: '8px',
                 }}
             >
-                <ScissorsIcon size={24} />
-            </button>
+                <button
+                    onClick={handleScissorsClick}
+                    title="Section"
+                    style={{
+                        ...roundButtonStyle(isActive),
+                        width: '48px',
+                        height: '48px',
+                    }}
+                >
+                    <ScissorsIcon size={24} />
+                </button>
+                <button
+                    onClick={() => navigationManager?.setViewPreset('iso')}
+                    title="Center model"
+                    style={{
+                        ...roundButtonStyle(false),
+                        width: '48px',
+                        height: '48px',
+                    }}
+                >
+                    <CenterIcon size={24} />
+                </button>
+            </div>
 
             {expanded && (
                 <>
