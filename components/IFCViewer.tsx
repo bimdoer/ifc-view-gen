@@ -171,29 +171,36 @@ export default function IFCViewer() {
     triggerRenderRef.current?.()
   }, [])
 
-  // Sync DoorListDock checkbox selection to 3D view: selected highlighted, rest dimmed
-  // Skip when color-by-geometry or door filter is active (they have their own visibility state)
+  // Sync DoorListDock checkbox selection to 3D view
+  // - Selection/hover highlights always apply (on top of geometry coloring)
+  // - Dim/reset only when NOT in color-by-geometry or door filter mode
   useEffect(() => {
     const vm = visibilityManagerRef.current
     if (!vm || doorContexts.length === 0) return
-    if (colorMode === 'geometry-type') return
-    if (doorFilterActive) return
 
-    const run = async () => {
-      if (dockSelectedDoorIds.size > 0) {
-        const selectedExpressIds = doorContexts
+    const selectedExpressIds = dockSelectedDoorIds.size > 0
+      ? doorContexts
           .filter(d => dockSelectedDoorIds.has(d.doorId))
           .map(d => d.door.expressID)
-        if (selectedExpressIds.length > 0) {
-          vm.setSelectedElements(selectedExpressIds)
-          await vm.dimNonSelectedElements(selectedExpressIds)
-        } else {
-          vm.setSelectedElements([])
-          await vm.resetAllVisibility()
-        }
+      : []
+
+    // Always sync selection highlights (visible on top of geometry coloring)
+    if (selectedExpressIds.length > 0) {
+      vm.setSelectedElements(selectedExpressIds)
+    } else {
+      vm.setSelectedElements([])
+    }
+
+    // Dim/reset only when not in color-by-geometry or door filter mode
+    if (colorMode === 'geometry-type' || doorFilterActive) {
+      triggerRenderRef.current?.()
+      return
+    }
+
+    const run = async () => {
+      if (selectedExpressIds.length > 0) {
+        await vm.dimNonSelectedElements(selectedExpressIds)
       } else {
-        vm.setSelectedElements([])
-        triggerRenderRef.current?.()
         await vm.resetAllVisibility()
       }
       triggerRenderRef.current?.()

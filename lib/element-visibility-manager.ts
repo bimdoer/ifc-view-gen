@@ -689,7 +689,7 @@ export class ElementVisibilityManager {
         // Create a group to hold highlight visuals
         const highlightGroup = new THREE.Group()
         highlightGroup.userData.isHighlightGroup = true
-        highlightGroup.renderOrder = 1 // Render after main model so highlights stay on top
+        highlightGroup.renderOrder = 1000 // Render on top of geometry coloring (fragments highlight)
 
         // 1. Create a wireframe box around the element
         const boxGeometry = new THREE.BoxGeometry(size.x * scale, size.y * scale, size.z * scale)
