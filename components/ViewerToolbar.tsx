@@ -172,7 +172,7 @@ export default function ViewerToolbar({
                         height: '48px',
                     }}
                 >
-                    <ScissorsIcon size={24} />
+                    <CenterIcon size={24} />
                 </button>
                 <button
                     onClick={() => navigationManager?.setViewPreset('iso')}
@@ -183,7 +183,7 @@ export default function ViewerToolbar({
                         height: '48px',
                     }}
                 >
-                    <CenterIcon size={24} />
+                    <ScissorsIcon size={24} />
                 </button>
             </div>
 
