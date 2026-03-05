@@ -112,8 +112,6 @@ export default function SectionDragOverlay({
 
     if (!active) return null
 
-    const label = direction === 'top' ? 'Drag from top' : 'Drag from bottom'
-
     return (
         <div
             ref={overlayRef}
@@ -138,32 +136,23 @@ export default function SectionDragOverlay({
                 backgroundColor: 'rgba(0, 0, 0, 0.05)',
             }}
         >
+            {/* Help text top center */}
             <div
                 style={{
                     position: 'absolute',
-                    top: '50%',
+                    top: '12px',
                     left: '50%',
-                    transform: 'translate(-50%, -50%)',
-                    padding: '16px 24px',
-                    backgroundColor: 'rgba(32, 32, 32, 0.95)',
-                    borderRadius: '8px',
+                    transform: 'translateX(-50%)',
+                    padding: '6px 14px',
+                    backgroundColor: 'rgba(32, 32, 32, 0.9)',
+                    borderRadius: '6px',
                     color: '#e0e0e0',
-                    fontSize: '13px',
+                    fontSize: '12px',
                     fontFamily: 'system-ui, -apple-system, sans-serif',
-                    textAlign: 'center',
                     pointerEvents: 'none',
-                    opacity: isDragging ? 0 : 1,
-                    transition: 'opacity 0.2s',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
                 }}
             >
-                <div style={{ fontWeight: 600, marginBottom: '8px', fontSize: '14px' }}>{label}</div>
-                <div style={{ color: '#888', fontSize: '12px' }}>
-                    Drag to position horizontal section plane
-                </div>
-                <div style={{ marginTop: '12px', color: '#666', fontSize: '11px' }}>
-                    ESC to cancel • F to flip section
-                </div>
+                F — Flip  •  Shift — Schieben  •  ESC — Abbrechen
             </div>
 
             {isDragging && containerRef.current && (

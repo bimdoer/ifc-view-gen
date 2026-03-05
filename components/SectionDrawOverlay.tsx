@@ -200,37 +200,23 @@ export default function SectionDrawOverlay({
                 backgroundColor: 'rgba(0, 0, 0, 0.05)',
             }}
         >
-            {/* Instructions */}
+            {/* Help text top center */}
             <div
                 style={{
                     position: 'absolute',
-                    top: '50%',
+                    top: '12px',
                     left: '50%',
-                    transform: 'translate(-50%, -50%)',
-                    padding: '16px 24px',
-                    backgroundColor: 'rgba(32, 32, 32, 0.95)',
-                    borderRadius: '8px',
+                    transform: 'translateX(-50%)',
+                    padding: '6px 14px',
+                    backgroundColor: 'rgba(32, 32, 32, 0.9)',
+                    borderRadius: '6px',
                     color: '#e0e0e0',
-                    fontSize: '13px',
+                    fontSize: '12px',
                     fontFamily: 'system-ui, -apple-system, sans-serif',
-                    textAlign: 'center',
                     pointerEvents: 'none',
-                    opacity: isDrawing ? 0 : 1,
-                    transition: 'opacity 0.2s',
-                    boxShadow: '0 4px 20px rgba(0,0,0,0.3)',
                 }}
             >
-                <div style={{ fontWeight: 600, marginBottom: '8px', fontSize: '14px' }}>
-                    Draw Section Line
-                </div>
-                <div style={{ color: '#888', fontSize: '12px', lineHeight: 1.5 }}>
-                    Draw a line to create a section plane<br />
-                    The model will be cut perpendicular to your line
-                </div>
-                <div style={{ marginTop: '12px', color: '#666', fontSize: '11px' }}>
-                    Shift — Hold for horizontal/vertical constraint<br />
-                    ESC to cancel • F to flip section
-                </div>
+                F — Flip  |  Shift — Schieben
             </div>
 
             {/* Section line being drawn */}

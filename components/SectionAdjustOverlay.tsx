@@ -106,6 +106,24 @@ export default function SectionAdjustOverlay({
                 pointerEvents: shiftHeld ? 'auto' : 'none',
             }}
         >
+            {/* Help text top center when section is active */}
+            <div
+                style={{
+                    position: 'absolute',
+                    top: '12px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    padding: '6px 14px',
+                    backgroundColor: 'rgba(32, 32, 32, 0.9)',
+                    borderRadius: '6px',
+                    color: '#e0e0e0',
+                    fontSize: '12px',
+                    fontFamily: 'system-ui, -apple-system, sans-serif',
+                    pointerEvents: 'none',
+                }}
+            >
+                F — Flip  •  Shift — Schieben
+            </div>
             {isDragging && (
                 <div
                     style={{
