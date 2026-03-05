@@ -14,6 +14,7 @@ import ViewerToolbar, { type SectionMode } from './ViewerToolbar'
 import ZoomWindowOverlay from './ZoomWindowOverlay'
 import SectionDrawOverlay from './SectionDrawOverlay'
 import SectionDragOverlay from './SectionDragOverlay'
+import SectionAdjustOverlay from './SectionAdjustOverlay'
 import SpatialHierarchyPanel from './SpatialHierarchyPanel'
 import TypeFilterPanel from './TypeFilterPanel'
 import IFCClassFilterPanel from './IFCClassFilterPanel'
@@ -904,7 +905,7 @@ Views:
 
 Section:
   R — Reset / Show full model
-  Shift — Hold for horizontal/vertical constraint
+  Shift — Constraint when drawing; Shift+Drag to move section after
   F — Flip section direction
   ESC — Cancel section drawing`)
             }}
@@ -960,6 +961,14 @@ Section:
           }}
           sectionPlane={sectionPlaneRef.current}
           camera={cameraRef.current}
+          containerRef={containerRef}
+          triggerRender={triggerRenderRef.current}
+        />
+
+        {/* Section Adjust Overlay - Shift+drag to move section when active */}
+        <SectionAdjustOverlay
+          active={isSectionActive && sectionMode === 'off'}
+          sectionPlane={sectionPlaneRef.current}
           containerRef={containerRef}
           triggerRender={triggerRenderRef.current}
         />
