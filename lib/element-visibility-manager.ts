@@ -252,9 +252,11 @@ export class ElementVisibilityManager {
     ]
 
     /**
-     * Color doors by geometry type, dim the rest (like selection)
+     * Color doors by geometry type.
+     * @param doorContexts - Door contexts to color
+     * @param hideNonDoors - If true, hide non-doors instead of dimming (e.g. when door filter is already active)
      */
-    async colorDoorsByGeometryType(doorContexts: DoorContext[]): Promise<void> {
+    async colorDoorsByGeometryType(doorContexts: DoorContext[], hideNonDoors: boolean = false): Promise<void> {
         this.isolatedElements = null
         this.dimmedElements = null
 
@@ -284,7 +286,15 @@ export class ElementVisibilityManager {
             await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
         }
 
-        if (nonDoorIds.length > 0) {
+        if (hideNonDoors) {
+            await this.fragmentsModel.setVisible(this.allModelIds, false)
+            const doorIdsToShow = this.storeyFilterIds
+                ? Array.from(doorIds).filter(id => this.storeyFilterIds!.includes(id))
+                : Array.from(doorIds)
+            if (doorIdsToShow.length > 0) {
+                await this.fragmentsModel.setVisible(doorIdsToShow, true)
+            }
+        } else if (nonDoorIds.length > 0) {
             await this.fragmentsModel.highlight(nonDoorIds, {
                 color: new THREE.Color(0xffffff),
                 renderedFaces: RenderedFaces.TWO,

@@ -19,6 +19,8 @@ interface ViewerToolbarProps {
     doorContexts?: DoorContext[]
     colorMode?: ColorMode
     onColorModeChange?: (mode: ColorMode) => void
+    doorFilterActive?: boolean
+    onDoorFilterChange?: (active: boolean) => void
 }
 
 function ScissorsIcon({ size = 20 }: { size?: number }) {
@@ -100,6 +102,16 @@ function GeometryTypeIcon({ size = 20 }: { size?: number }) {
     )
 }
 
+function DoorIcon({ size = 20 }: { size?: number }) {
+    return (
+        <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M4 20h16" />
+            <path d="M4 20V4" />
+            <path d="M4 4a16 16 0 0 1 16 16" />
+        </svg>
+    )
+}
+
 const roundButtonStyle = (active: boolean, size: 40 | 48 = 48) => ({
     width: `${size}px`,
     height: `${size}px`,
@@ -125,6 +137,8 @@ export default function ViewerToolbar({
     doorContexts = [],
     colorMode = 'off',
     onColorModeChange,
+    doorFilterActive = false,
+    onDoorFilterChange,
 }: ViewerToolbarProps) {
     const [expanded, setExpanded] = useState(false)
     const [colorExpanded, setColorExpanded] = useState(false)
@@ -170,9 +184,20 @@ export default function ViewerToolbar({
             onColorModeChange?.('off')
         } else if (visibilityManager && doorContexts.length > 0) {
             onColorModeChange?.('geometry-type')
-            await visibilityManager.colorDoorsByGeometryType(doorContexts)
+            await visibilityManager.colorDoorsByGeometryType(doorContexts, doorFilterActive)
         }
         setColorExpanded(false)
+    }
+
+    const handleDoorFilterClick = async () => {
+        if (!visibilityManager) return
+        if (doorFilterActive) {
+            onDoorFilterChange?.(false)
+            await visibilityManager.resetAllVisibility()
+        } else {
+            onDoorFilterChange?.(true)
+            await visibilityManager.filterByIFCClass(['IFCDOOR'])
+        }
     }
 
     const isSectionMode = sectionMode !== 'off'
@@ -292,6 +317,13 @@ export default function ViewerToolbar({
                         </button>
                     )}
                 </div>
+                <button
+                    onClick={handleDoorFilterClick}
+                    title="Nur IfcDoors anzeigen"
+                    style={roundButtonStyle(doorFilterActive)}
+                >
+                    <DoorIcon size={24} />
+                </button>
             </div>
         </div>
     )

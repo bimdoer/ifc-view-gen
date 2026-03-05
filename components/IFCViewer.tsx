@@ -51,6 +51,7 @@ export default function IFCViewer() {
   const DOCK_RIGHT_OFFSET_PX = 400
   const [dockHeightPx, setDockHeightPx] = useState(260)
   const [colorMode, setColorMode] = useState<ColorMode>('off')
+  const [doorFilterActive, setDoorFilterActive] = useState(false)
 
   const getDockDoorLabel = useCallback((door: DoorContext) => {
     return (
@@ -171,11 +172,12 @@ export default function IFCViewer() {
   }, [])
 
   // Sync DoorListDock checkbox selection to 3D view: selected highlighted, rest dimmed
-  // Skip when color-by-geometry is active (it has its own visibility state)
+  // Skip when color-by-geometry or door filter is active (they have their own visibility state)
   useEffect(() => {
     const vm = visibilityManagerRef.current
     if (!vm || doorContexts.length === 0) return
     if (colorMode === 'geometry-type') return
+    if (doorFilterActive) return
 
     const run = async () => {
       if (dockSelectedDoorIds.size > 0) {
@@ -197,7 +199,7 @@ export default function IFCViewer() {
       triggerRenderRef.current?.()
     }
     run()
-  }, [dockSelectedDoorIds, doorContexts, colorMode])
+  }, [dockSelectedDoorIds, doorContexts, colorMode, doorFilterActive])
 
   // File names for display
   const [archFileName, setArchFileName] = useState<string>('')
@@ -1365,6 +1367,11 @@ Section:
             onColorModeChange={(mode) => {
               setColorMode(mode)
               // useEffect will re-apply dock selection or reset when colorMode becomes 'off'
+            }}
+            doorFilterActive={doorFilterActive}
+            onDoorFilterChange={(active) => {
+              setDoorFilterActive(active)
+              triggerRenderRef.current?.()
             }}
           />
 
