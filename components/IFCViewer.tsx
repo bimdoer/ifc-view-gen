@@ -173,24 +173,39 @@ export default function IFCViewer() {
     const vm = visibilityManagerRef.current
     if (!vm || doorContexts.length === 0) return
 
+    visibilitySyncRunIdRef.current += 1
+    const runId = visibilitySyncRunIdRef.current
+
     const run = async () => {
-      if (dockSelectedDoorIds.size > 0) {
-        const selectedExpressIds = doorContexts
-          .filter(d => dockSelectedDoorIds.has(d.doorId))
-          .map(d => d.door.expressID)
-        if (selectedExpressIds.length > 0) {
-          vm.setSelectedElements(selectedExpressIds)
-          await vm.dimNonSelectedElements(selectedExpressIds)
+      try {
+        if (dockSelectedDoorIds.size > 0) {
+          const selectedExpressIds = doorContexts
+            .filter(d => dockSelectedDoorIds.has(d.doorId))
+            .map(d => d.door.expressID)
+          if (selectedExpressIds.length > 0) {
+            if (runId !== visibilitySyncRunIdRef.current) return
+            vm.setSelectedElements(selectedExpressIds)
+            if (runId !== visibilitySyncRunIdRef.current) return
+            await vm.dimNonSelectedElements(selectedExpressIds)
+          } else {
+            if (runId !== visibilitySyncRunIdRef.current) return
+            vm.setSelectedElements([])
+            if (runId !== visibilitySyncRunIdRef.current) return
+            await vm.resetAllVisibility()
+          }
         } else {
+          if (runId !== visibilitySyncRunIdRef.current) return
           vm.setSelectedElements([])
+          if (runId !== visibilitySyncRunIdRef.current) return
+          triggerRenderRef.current?.()
+          if (runId !== visibilitySyncRunIdRef.current) return
           await vm.resetAllVisibility()
         }
-      } else {
-        vm.setSelectedElements([])
+        if (runId !== visibilitySyncRunIdRef.current) return
         triggerRenderRef.current?.()
-        await vm.resetAllVisibility()
+      } catch (err) {
+        console.error('[IFCViewer] Visibility sync error:', err)
       }
-      triggerRenderRef.current?.()
     }
     run()
   }, [dockSelectedDoorIds, doorContexts])
@@ -207,6 +222,7 @@ export default function IFCViewer() {
   const batchProcessorVisibleRef = useRef(false)
   const fragmentsManagerRef = useRef<any>(null) // Fragments manager for update() in render loop
   const triggerRenderRef = useRef<() => void>(() => { }) // Function to trigger a render
+  const visibilitySyncRunIdRef = useRef(0)
   const isLoadingRef = useRef(false) // Prevent double-loading from React StrictMode
 
   // Spatial structure
