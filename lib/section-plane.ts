@@ -197,8 +197,15 @@ export class SectionPlane {
             maxV = Math.max(maxV, vVal)
         }
 
-        const width = Math.max(maxU - minU, 0.01)
-        const height = Math.max(maxV - minV, 0.01)
+        const size = this.originalBounds.getSize(new THREE.Vector3())
+        const projWidth = Math.max(maxU - minU, 0.01)
+        const projHeight = Math.max(maxV - minV, 0.01)
+
+        const diagonal3D = Math.sqrt(size.x * size.x + size.y * size.y + size.z * size.z)
+
+        const width = Math.max(projWidth, diagonal3D, 0.01)
+        const height = Math.max(projHeight, diagonal3D, 0.01)
+
         const centerU = (minU + maxU) / 2
         const centerV = (minV + maxV) / 2
         return { width, height, centerU, centerV, u, v }

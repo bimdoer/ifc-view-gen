@@ -715,7 +715,11 @@ export default function IFCViewer() {
         spatialStructureRef.current = spatialRoot // Store in ref for immediate access
 
         // Initialize section plane manager (supports multiple sections)
+        // Bounds = gesamte Geometrie (Arch-Modell; Electrical wird bei Bedarf ergänzt)
         const modelBounds = new THREE.Box3().setFromObject(group)
+        if (electricalModelGroupRef.current) {
+          modelBounds.union(new THREE.Box3().setFromObject(electricalModelGroupRef.current))
+        }
         if (sceneRef.current && rendererRef.current) {
           sectionPlaneManagerRef.current?.dispose()
           const manager = new SectionPlaneManager(
@@ -805,6 +809,12 @@ export default function IFCViewer() {
         if (sceneRef.current) {
           sceneRef.current.add(group)
           electricalModelGroupRef.current = group
+        }
+        // Section-Bounds aktualisieren: gesamte Geometrie (Arch + Electrical)
+        if (sectionPlaneManagerRef.current && modelGroupRef.current) {
+          const combinedBounds = new THREE.Box3().setFromObject(modelGroupRef.current)
+          combinedBounds.union(new THREE.Box3().setFromObject(group))
+          sectionPlaneManagerRef.current.setBounds(combinedBounds)
         }
       }
 
