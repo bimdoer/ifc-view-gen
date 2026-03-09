@@ -77,6 +77,7 @@ export default function TypeFilterPanel({
 
     isApplying.current = true
     let pending: Set<string> | null | undefined
+    let succeeded = false
     try {
       await visibilityManager.enqueueFilterUpdate(async () => {
         if (types === null) {
@@ -88,10 +89,13 @@ export default function TypeFilterPanel({
           await visibilityManager!.filterByType(typesToShow)
         }
       })
+      succeeded = true
     } finally {
       isApplying.current = false
-      pending = pendingFiltersRef.current
-      pendingFiltersRef.current = undefined
+      if (succeeded) {
+        pending = pendingFiltersRef.current
+        pendingFiltersRef.current = undefined
+      }
     }
     if (pending !== undefined) {
       try {
