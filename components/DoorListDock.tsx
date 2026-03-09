@@ -448,11 +448,13 @@ export default function DoorListDock({
    }, [filteredDoors, selectedDoorIds, onToggleSelect])
 
    useEffect(() => {
-     if (!scrollToDoorId || !onScrollToDoorHandled) return
+     if (!scrollToDoorId) return
      const el = scrollContainerRef.current?.querySelector(`[data-door-id="${scrollToDoorId}"]`)
-     el?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
-     onScrollToDoorHandled()
-   }, [scrollToDoorId, onScrollToDoorHandled])
+     if (el) {
+       el.scrollIntoView({ block: 'nearest', behavior: 'auto' })
+       onScrollToDoorHandled?.()
+     }
+   }, [scrollToDoorId])
 
    useEffect(() => {
      onStoreyFilterChange?.(storeyFilter === null ? new Set() : storeyFilter)
