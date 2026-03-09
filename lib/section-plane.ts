@@ -285,6 +285,7 @@ export class SectionPlane {
                 clippingPlanes: [], // Don't clip the section plane visual itself
             })
             this.planeMesh = new THREE.Mesh(planeGeometry, planeMaterial)
+            this.planeMesh.userData.isSectionHelper = true
             this.planeMesh.position.copy(meshCenter)
             this.planeMesh.quaternion.copy(quaternion)
             this.planeMesh.renderOrder = 998
@@ -315,6 +316,7 @@ export class SectionPlane {
             })
 
             this.planeOutline = new THREE.LineSegments(lineGeometry, lineMaterial) as unknown as THREE.Mesh
+            this.planeOutline.userData.isSectionHelper = true
             this.planeOutline.renderOrder = 999
 
             this.planeOutline.position.copy(meshCenter)
@@ -522,6 +524,7 @@ export class SectionPlaneManager {
         }
 
         this.scene.traverse((object) => {
+            if (object.userData?.isSectionHelper) return
             if (object instanceof THREE.Mesh && object.material) {
                 const materials = Array.isArray(object.material) ? object.material : [object.material]
                 materials.forEach(mat => {
