@@ -105,7 +105,10 @@ export class ElementVisibilityManager {
         for (const id of localIds) {
             this.hiddenElements.add(id)
         }
-        await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
+        }
+        await this.applyVisibilityFromFilters()
         await this.applyChanges()
     }
 
@@ -138,19 +141,16 @@ export class ElementVisibilityManager {
             this.hiddenElements.delete(id)
         }
 
-        // Update visibility: hide hidden elements, show others (unless isolated)
         if (this.isolatedElements) {
-            // In isolate mode, only show isolated elements
             const toShow = Array.from(this.isolatedElements).filter(id => !this.hiddenElements.has(id))
             const toHide = Array.from(this.elements.keys()).filter(id => !this.isolatedElements!.has(id) || this.hiddenElements.has(id))
             await this.fragmentsModel.setVisible(toShow, true)
             await this.fragmentsModel.setVisible(toHide, false)
         } else {
-            // Normal mode: show all except hidden
-            const toShow = Array.from(this.elements.keys()).filter(id => !this.hiddenElements.has(id))
-            const toHide = Array.from(this.hiddenElements)
-            await this.fragmentsModel.setVisible(toShow, true)
-            await this.fragmentsModel.setVisible(toHide, false)
+            if (this.allModelIds.length === 0) {
+                await this.cacheAllModelIds()
+            }
+            await this.applyVisibilityFromFilters()
         }
         await this.applyChanges()
     }
@@ -180,13 +180,10 @@ export class ElementVisibilityManager {
     async exitIsolation(): Promise<void> {
         this.isolatedElements = null
 
-        // Show all elements using resetVisible()
-        await this.fragmentsModel.resetVisible()
-
-        // Then hide the ones that were hidden before isolation
-        if (this.hiddenElements.size > 0) {
-            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
         }
+        await this.applyVisibilityFromFilters()
         await this.applyChanges()
     }
 
@@ -202,19 +199,11 @@ export class ElementVisibilityManager {
             await this.cacheAllModelIds()
         }
 
-        const visibleIds = this.storeyFilterIds ?? this.allModelIds
+        const visibleIds = this.computeVisibleIdsFromFilters()
         const selectedSet = new Set(selectedIds)
         const nonSelectedIds = visibleIds.filter(id => !selectedSet.has(id))
 
-        await this.fragmentsModel.resetVisible()
-
-        if (this.storeyFilterIds && this.storeyFilterIds.length > 0) {
-            await this.fragmentsModel.setVisible(this.allModelIds, false)
-            await this.fragmentsModel.setVisible(this.storeyFilterIds, true)
-        }
-        if (this.hiddenElements.size > 0) {
-            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
-        }
+        await this.applyVisibilityFromFilters()
 
         if (nonSelectedIds.length > 0) {
             await this.fragmentsModel.highlight(nonSelectedIds, {
@@ -239,6 +228,50 @@ export class ElementVisibilityManager {
     }
 
     /**
+     * Compute visible IDs as intersection of all active filters (storey, type, IFC class)
+     * excluding hiddenElements. Used by all visibility paths.
+     */
+    private computeVisibleIdsFromFilters(): number[] {
+        let ids = this.storeyFilterIds && this.storeyFilterIds.length > 0
+            ? [...this.storeyFilterIds]
+            : [...this.allModelIds]
+
+        if (this.typeFilters.size > 0) {
+            ids = ids.filter(id => {
+                const el = this.elements.get(id)
+                if (!el) return false
+                const productType = (el.productTypeName || '').toLowerCase()
+                return productType && this.typeFilters.has(productType)
+            })
+        }
+        if (this.ifcClassFilters.size > 0) {
+            ids = ids.filter(id => {
+                const el = this.elements.get(id)
+                if (!el) return false
+                const ifcClass = (el.typeName || '').toLowerCase()
+                return ifcClass && this.ifcClassFilters.has(ifcClass)
+            })
+        }
+        ids = ids.filter(id => !this.hiddenElements.has(id))
+        return ids
+    }
+
+    /**
+     * Apply visibility from the intersection of all active filters.
+     * Hides all, shows visibleIds, then hides hiddenElements.
+     */
+    private async applyVisibilityFromFilters(): Promise<void> {
+        const visibleIds = this.computeVisibleIdsFromFilters()
+        await this.fragmentsModel.setVisible(this.allModelIds, false)
+        if (visibleIds.length > 0) {
+            await this.fragmentsModel.setVisible(visibleIds, true)
+        }
+        if (this.hiddenElements.size > 0) {
+            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        }
+    }
+
+    /**
      * Re-apply visibility from active filters (storey, type, IFC class, hidden).
      * Does not touch selectedElements, dimmedElements, or isolatedElements.
      */
@@ -246,41 +279,7 @@ export class ElementVisibilityManager {
         if (this.allModelIds.length === 0) {
             await this.cacheAllModelIds()
         }
-
-        if (this.storeyFilterIds && this.storeyFilterIds.length > 0) {
-            await this.fragmentsModel.setVisible(this.allModelIds, false)
-            await this.fragmentsModel.setVisible(this.storeyFilterIds, true)
-        } else if (this.typeFilters.size > 0) {
-            const visibleIds: number[] = []
-            for (const [id, element] of this.elements.entries()) {
-                const productType = (element.productTypeName || '').toLowerCase()
-                if (productType && this.typeFilters.has(productType) && !this.hiddenElements.has(id)) {
-                    visibleIds.push(id)
-                }
-            }
-            await this.fragmentsModel.setVisible(this.allModelIds, false)
-            if (visibleIds.length > 0) {
-                await this.fragmentsModel.setVisible(visibleIds, true)
-            }
-        } else if (this.ifcClassFilters.size > 0) {
-            const visibleIds: number[] = []
-            for (const [id, element] of this.elements.entries()) {
-                const ifcClass = (element.typeName || '').toLowerCase()
-                if (ifcClass && this.ifcClassFilters.has(ifcClass) && !this.hiddenElements.has(id)) {
-                    visibleIds.push(id)
-                }
-            }
-            await this.fragmentsModel.setVisible(this.allModelIds, false)
-            if (visibleIds.length > 0) {
-                await this.fragmentsModel.setVisible(visibleIds, true)
-            }
-        } else {
-            await this.fragmentsModel.resetVisible()
-        }
-
-        if (this.hiddenElements.size > 0) {
-            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
-        }
+        await this.applyVisibilityFromFilters()
     }
 
     /**
@@ -301,7 +300,7 @@ export class ElementVisibilityManager {
     }
 
     /**
-     * Filter by product type names - hides ALL model elements except matching types
+     * Filter by product type names - restricts visibility to matching types
      * Only filters by productTypeName (from IfcDoorType, etc.) - NOT IFC classes
      */
     async filterByType(typeNames: string[]): Promise<void> {
@@ -309,35 +308,16 @@ export class ElementVisibilityManager {
         // Clear IFC class filters when applying type filters (mutually exclusive)
         this.ifcClassFilters.clear()
 
-        // Ensure we have all model IDs cached
         if (this.allModelIds.length === 0) {
             await this.cacheAllModelIds()
         }
 
-        // Find elements that match the filter by productTypeName only
-        const visibleIds: number[] = []
-        for (const [id, element] of this.elements.entries()) {
-            const productType = (element.productTypeName || '').toLowerCase()
-
-            // Only match against product type name (from IfcDoorType, etc.)
-            if (productType && this.typeFilters.has(productType) && !this.hiddenElements.has(id)) {
-                visibleIds.push(id)
-            }
-        }
-
-
-        // First hide ALL elements in the entire model
-        await this.fragmentsModel.setVisible(this.allModelIds, false)
-
-        // Then show only the matching elements
-        if (visibleIds.length > 0) {
-            await this.fragmentsModel.setVisible(visibleIds, true)
-        }
+        await this.applyVisibilityFromFilters()
         await this.applyChanges()
     }
 
     /**
-     * Filter by IFC class names (e.g., "IFCDOOR", "IFCWALL") - hides ALL model elements except matching classes
+     * Filter by IFC class names (e.g., "IFCDOOR", "IFCWALL") - restricts visibility to matching classes
      * Filters by typeName (IFC class) - NOT product type names
      */
     async filterByIFCClass(classNames: string[]): Promise<void> {
@@ -345,29 +325,11 @@ export class ElementVisibilityManager {
         // Clear type filters when applying IFC class filters (mutually exclusive)
         this.typeFilters.clear()
 
-        // Ensure we have all model IDs cached
         if (this.allModelIds.length === 0) {
             await this.cacheAllModelIds()
         }
 
-        // Find elements that match the filter by typeName (IFC class)
-        const visibleIds: number[] = []
-        for (const [id, element] of this.elements.entries()) {
-            const ifcClass = (element.typeName || '').toLowerCase()
-
-            // Match against IFC class name (e.g., "ifcdoor", "ifcwall")
-            if (ifcClass && this.ifcClassFilters.has(ifcClass) && !this.hiddenElements.has(id)) {
-                visibleIds.push(id)
-            }
-        }
-
-        // First hide ALL elements in the entire model
-        await this.fragmentsModel.setVisible(this.allModelIds, false)
-
-        // Then show only the matching elements
-        if (visibleIds.length > 0) {
-            await this.fragmentsModel.setVisible(visibleIds, true)
-        }
+        await this.applyVisibilityFromFilters()
         await this.applyChanges()
     }
 
@@ -377,15 +339,11 @@ export class ElementVisibilityManager {
     async clearTypeFilters(): Promise<void> {
         this.typeFilters.clear()
 
-
-        // Show all elements using resetVisible()
-        await this.fragmentsModel.resetVisible()
-
-        // Re-apply any hidden elements
-        if (this.hiddenElements.size > 0) {
-            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
         }
 
+        await this.applyVisibilityFromFilters()
         await this.applyChanges()
     }
 
@@ -395,14 +353,11 @@ export class ElementVisibilityManager {
     async clearIFCClassFilters(): Promise<void> {
         this.ifcClassFilters.clear()
 
-        // Show all elements using resetVisible()
-        await this.fragmentsModel.resetVisible()
-
-        // Re-apply any hidden elements
-        if (this.hiddenElements.size > 0) {
-            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
         }
 
+        await this.applyVisibilityFromFilters()
         await this.applyChanges()
     }
 
@@ -450,7 +405,7 @@ export class ElementVisibilityManager {
     }
 
     /**
-     * Filter by storey - hides ALL model elements except those in selected storeys
+     * Filter by storey - restricts visibility to elements in selected storeys
      */
     async filterByStorey(elementIds: number[]): Promise<void> {
         this.storeyFilterIds = elementIds
@@ -459,11 +414,7 @@ export class ElementVisibilityManager {
             await this.cacheAllModelIds()
         }
 
-        await this.fragmentsModel.setVisible(this.allModelIds, false)
-        if (elementIds.length > 0) {
-            const visibleStoreyIds = elementIds.filter(id => !this.hiddenElements.has(id))
-            await this.fragmentsModel.setVisible(visibleStoreyIds, true)
-        }
+        await this.applyVisibilityFromFilters()
         await this.applyChanges()
     }
 
@@ -472,10 +423,12 @@ export class ElementVisibilityManager {
      */
     async clearStoreyFilter(): Promise<void> {
         this.storeyFilterIds = null
-        await this.fragmentsModel.resetVisible()
-        if (this.hiddenElements.size > 0) {
-            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
         }
+
+        await this.applyVisibilityFromFilters()
         await this.applyChanges()
     }
 
