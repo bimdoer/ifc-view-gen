@@ -232,6 +232,9 @@ export default function IFCViewer() {
       }
     }
     run()
+    return () => {
+      visibilitySyncRunIdRef.current = -1
+    }
   }, [dockSelectedDoorIds, doorContexts])
 
   // File names for display

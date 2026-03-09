@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react'
-import type { CSSProperties, RefObject } from 'react'
+import type { CSSProperties, MutableRefObject, RefObject } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
 
 type SortField = 'door' | 'type' | 'storey' | 'brandschutz' | 'schallschutz' | 'lb' | 'lh' | 'rb' | 'rh' | 'bram' | 'hram' | 'guid'
@@ -162,7 +162,7 @@ export type DoorListDockProps = {
   onDockHeightChange?: (heightPx: number) => void
   minDockHeightPx?: number
   maxDockHeightPx?: number
-  listContainerRef?: RefObject<HTMLDivElement | null>
+  listContainerRef?: MutableRefObject<HTMLDivElement | null>
   scrollToDoorId?: string | null
   onScrollToDoorHandled?: () => void
 }
@@ -521,7 +521,7 @@ export default function DoorListDock({
       }
       ref={(el) => {
         scrollContainerRef.current = el
-        if (listContainerRef) (listContainerRef as any).current = el
+        if (listContainerRef) listContainerRef.current = el
       }}
     >
       <div className="door-list-scroll-area">

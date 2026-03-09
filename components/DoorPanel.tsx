@@ -614,6 +614,8 @@ export default function DoorPanel({
         <div className="header-actions">
           <button
             className={`icon-button ${isolateFiltered ? 'active' : ''}`}
+            aria-label={isolateFiltered ? 'Show all elements' : 'Isolate doors in 3D'}
+            aria-pressed={isolateFiltered}
             onClick={() => {
               setIsolateFiltered(prev => !prev)
               if (!isolateFiltered) setDimFiltered(false)
@@ -627,6 +629,8 @@ export default function DoorPanel({
           </button>
           <button
             className={`icon-button ${dimFiltered ? 'active' : ''}`}
+            aria-label={dimFiltered ? 'Show all elements' : 'Dim non-matching elements'}
+            aria-pressed={dimFiltered}
             onClick={() => {
               setDimFiltered(prev => !prev)
               if (!dimFiltered) setIsolateFiltered(false)
