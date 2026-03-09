@@ -304,6 +304,7 @@ export default function IFCViewer() {
     const pointerDownRef = { x: 0, y: 0, active: false }
 
     const handlePointerDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
       if (!showBatchProcessor || doorContexts.length === 0) return
       if (zoomWindowActive || sectionMode !== 'off') return
 
@@ -313,6 +314,7 @@ export default function IFCViewer() {
     }
 
     const handlePointerUp = (e: PointerEvent) => {
+      if (e.button !== 0) return
       if (!showBatchProcessor || doorContexts.length === 0) return
       if (zoomWindowActive || sectionMode !== 'off') return
       if (!pointerDownRef.active) return
