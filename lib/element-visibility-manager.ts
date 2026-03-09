@@ -470,6 +470,16 @@ export class ElementVisibilityManager {
     }
 
     /**
+     * Clear only geometry-type coloring (highlight). Keeps visibility filters (IFC class, storey, type).
+     * Use when turning off Colorize while Filter may still be active.
+     */
+    async clearGeometryColoring(): Promise<void> {
+        await this.fragmentsModel.resetHighlight()
+        await this.reapplyVisibilityFromFilters()
+        await this.applyChanges()
+    }
+
+    /**
      * Set transparency for elements (0 = fully transparent, 1 = opaque)
      */
     async setTransparency(localIds: number[], opacity: number): Promise<void> {

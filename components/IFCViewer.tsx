@@ -439,6 +439,15 @@ export default function IFCViewer() {
     // Expose trigger function for external components
     triggerRenderRef.current = () => {
       needsRender = true
+      // useCamera + update: Fragments need camera sync for highlight/LOD to apply (Colorize rebuild)
+      const model = loadedModelRef.current
+      if (model?.fragmentsModel && cameraRef.current) {
+        model.fragmentsModel.useCamera(cameraRef.current)
+      }
+      if (fragmentsManagerRef.current) {
+        fragmentsManagerRef.current.update(true)
+      }
+      renderer.render(scene, camera)
     }
 
     const animate = () => {
@@ -1457,15 +1466,24 @@ Section:
             visibilityManager={visibilityManagerRef.current}
             doorContexts={doorContexts}
             colorMode={colorMode}
-            onColorModeChange={(mode) => {
+            onColorModeChange={async (mode) => {
               setColorMode(mode)
-              // useEffect will re-apply dock selection or reset when colorMode becomes 'off'
+              if (mode === 'off' && visibilityManagerRef.current) {
+                await visibilityManagerRef.current.clearGeometryColoring()
+                triggerRenderRef.current?.()
+                requestAnimationFrame(() => {
+                  requestAnimationFrame(() => triggerRenderRef.current?.())
+                })
+              } else {
+                triggerRenderRef.current?.()
+              }
             }}
             doorFilterActive={doorFilterActive}
             onDoorFilterChange={(active) => {
               setDoorFilterActive(active)
               triggerRenderRef.current?.()
             }}
+            onTriggerRender={() => triggerRenderRef.current?.()}
           />
 
           {/* Spatial Hierarchy Panel */}
@@ -1489,6 +1507,7 @@ Section:
                 if (filters !== null) {
                   setActiveIFCClassFilters(null)
                 }
+                triggerRenderRef.current?.()
               }}
               onClose={() => setShowTypeFilter(false)}
             />
@@ -1506,6 +1525,7 @@ Section:
                 if (filters !== null) {
                   setActiveClassFilters(null)
                 }
+                triggerRenderRef.current?.()
               }}
               onClose={() => setShowIFCClassFilter(false)}
             />

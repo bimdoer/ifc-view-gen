@@ -21,6 +21,7 @@ interface ViewerToolbarProps {
     onColorModeChange?: (mode: ColorMode) => void
     doorFilterActive?: boolean
     onDoorFilterChange?: (active: boolean) => void
+    onTriggerRender?: () => void
 }
 
 function ScissorsIcon({ size = 20 }: { size?: number }) {
@@ -139,6 +140,7 @@ export default function ViewerToolbar({
     onColorModeChange,
     doorFilterActive = false,
     onDoorFilterChange,
+    onTriggerRender,
 }: ViewerToolbarProps) {
     const [expanded, setExpanded] = useState(false)
     const [colorExpanded, setColorExpanded] = useState(false)
@@ -171,9 +173,13 @@ export default function ViewerToolbar({
         setExpanded(false)
     }
 
-    const handleColorClick = () => {
+    const handleColorClick = async () => {
         if (colorMode !== 'off') {
-            onColorModeChange?.('off')
+            await onColorModeChange?.('off')
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => onTriggerRender?.())
+            })
+            onTriggerRender?.()
         } else {
             setColorExpanded((prev) => !prev)
         }
@@ -181,10 +187,19 @@ export default function ViewerToolbar({
 
     const handleColorByGeometryType = async () => {
         if (colorMode === 'geometry-type') {
-            onColorModeChange?.('off')
+            await onColorModeChange?.('off')
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => onTriggerRender?.())
+            })
+            onTriggerRender?.()
         } else if (visibilityManager && doorContexts.length > 0) {
             onColorModeChange?.('geometry-type')
             await visibilityManager.colorDoorsByGeometryType(doorContexts, doorFilterActive)
+            // Double rAF: Fragments highlight needs a frame to commit before render shows it
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => onTriggerRender?.())
+            })
+            onTriggerRender?.()
         }
         setColorExpanded(false)
     }
@@ -192,12 +207,19 @@ export default function ViewerToolbar({
     const handleDoorFilterClick = async () => {
         if (!visibilityManager) return
         if (doorFilterActive) {
+            if (colorMode === 'geometry-type' && doorContexts.length > 0) {
+                // Nur Door-Filter aufheben, Colorize beibehalten
+                await visibilityManager.clearIFCClassFilters()
+                await visibilityManager.colorDoorsByGeometryType(doorContexts, false)
+            } else {
+                await visibilityManager.resetAllVisibility()
+            }
             onDoorFilterChange?.(false)
-            await visibilityManager.resetAllVisibility()
         } else {
-            onDoorFilterChange?.(true)
             await visibilityManager.filterByIFCClass(['IFCDOOR'])
+            onDoorFilterChange?.(true)
         }
+        onTriggerRender?.()
     }
 
     const isSectionMode = sectionMode !== 'off'
