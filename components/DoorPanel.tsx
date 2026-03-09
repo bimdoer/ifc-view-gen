@@ -252,13 +252,13 @@ export default function DoorPanel({
       visibilityManager.dimNonSelectedElements(doorExpressIds)
       isControllingVisibilityRef.current = true
     } else if (isControllingVisibilityRef.current) {
-      visibilityManager.resetAllVisibility()
+      visibilityManager.clearSelectionAndDimState()
       isControllingVisibilityRef.current = false
     }
 
     return () => {
       if (isControllingVisibilityRef.current && visibilityManager) {
-        visibilityManager.resetAllVisibility()
+        visibilityManager.clearSelectionAndDimState()
         isControllingVisibilityRef.current = false
       }
     }
