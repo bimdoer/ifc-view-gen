@@ -98,6 +98,7 @@ export default function TypeFilterPanel({
         await applyFilter(pending)
       } catch (err) {
         console.error('TypeFilter: Error applying pending filter:', err)
+        throw err
       }
     }
   }
