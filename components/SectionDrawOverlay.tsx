@@ -47,22 +47,30 @@ export default function SectionDrawOverlay({
         }
     }, [containerRef])
 
-    // Snap to 0°, 90°, 180°, 270° in world XY plane when Shift is held (independent of camera rotation)
+    // Snap to 0°, 90°, 180°, 270° in world XZ plane when Shift is held (independent of camera rotation)
     const SNAP_ANGLES = [0, Math.PI / 2, Math.PI, -Math.PI / 2] as const
 
-    const getConstrainedPoint = useCallback((
+    const getConstrainedResult = useCallback((
         start: { x: number; y: number },
         current: { x: number; y: number },
         shift: boolean,
         width: number,
         height: number
-    ) => {
-        if (!shift || !camera || !sectionPlaneManager) return current
+    ): {
+        screenCoords: { x: number; y: number }
+        startNDC?: { x: number; y: number }
+        endNDC?: { x: number; y: number }
+        startWorld?: THREE.Vector3
+        endWorld?: THREE.Vector3
+    } => {
+        if (!shift || !camera || !sectionPlaneManager) {
+            return { screenCoords: current }
+        }
 
         const dx = current.x - start.x
         const dy = current.y - start.y
         const length = Math.sqrt(dx * dx + dy * dy)
-        if (length < 0.001) return current
+        if (length < 0.001) return { screenCoords: current }
 
         // Convert screen points to world points on the view plane through model center
         const bounds = sectionPlaneManager.getBounds()
@@ -91,7 +99,7 @@ export default function SectionDrawOverlay({
             currentWorld.z - startWorld.z
         )
         const lenXZ = dirXZ.length()
-        if (lenXZ < 0.001) return current
+        if (lenXZ < 0.001) return { screenCoords: current }
 
         const angle = Math.atan2(dirXZ.y, dirXZ.x)
         const snapAngle = SNAP_ANGLES.reduce((best, a) => {
@@ -107,10 +115,21 @@ export default function SectionDrawOverlay({
             0,
             Math.sin(snapAngle) * lenXZ
         ))
-        const ndc = endWorld.clone().project(camera)
+
+        // Use NDC directly from world positions to avoid conversion errors (section must align with line)
+        const startNDC = startWorld.clone().project(camera)
+        const endNDC = endWorld.clone().project(camera)
+
+        const screenCoords = {
+            x: ((endNDC.x + 1) / 2) * width,
+            y: (1 - endNDC.y) / 2 * height,
+        }
         return {
-            x: ((ndc.x + 1) / 2) * width,
-            y: (1 - ndc.y) / 2 * height,
+            screenCoords,
+            startNDC: { x: startNDC.x, y: startNDC.y },
+            endNDC: { x: endNDC.x, y: endNDC.y },
+            startWorld: startWorld.clone(),
+            endWorld: endWorld.clone(),
         }
     }, [camera, sectionPlaneManager])
 
@@ -134,8 +153,8 @@ export default function SectionDrawOverlay({
             e.stopPropagation()
             const width = containerRef.current?.clientWidth || overlayRef.current?.clientWidth || 1
             const height = containerRef.current?.clientHeight || overlayRef.current?.clientHeight || 1
-            const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld, width, height)
-            setCurrentPoint(constrainedCoords)
+            const result = getConstrainedResult(startPoint, coords, shiftHeld, width, height)
+            setCurrentPoint(result.screenCoords)
         }
     }
 
@@ -147,31 +166,32 @@ export default function SectionDrawOverlay({
         const coords = getRelativeCoords(e)
         const width = containerRef.current?.clientWidth || overlayRef.current?.clientWidth || 1
         const height = containerRef.current?.clientHeight || overlayRef.current?.clientHeight || 1
-        const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld, width, height)
-        setCurrentPoint(constrainedCoords)
+        const result = getConstrainedResult(startPoint, coords, shiftHeld, width, height)
+        setCurrentPoint(result.screenCoords)
         setIsDrawing(false)
 
         // Calculate line length using constrained coordinates
-        const dx = constrainedCoords.x - startPoint.x
-        const dy = constrainedCoords.y - startPoint.y
+        const dx = result.screenCoords.x - startPoint.x
+        const dy = result.screenCoords.y - startPoint.y
         const length = Math.sqrt(dx * dx + dy * dy)
 
         // Only create section if line is long enough
         if (length > 30 && sectionPlaneManager && camera && overlayRef.current) {
-            // Use canvas container dimensions to match camera projection exactly
-            const width = containerRef.current?.clientWidth || overlayRef.current.clientWidth
-            const height = containerRef.current?.clientHeight || overlayRef.current.clientHeight
-
-            const startNDC = {
-                x: (startPoint.x / width) * 2 - 1,
-                y: -((startPoint.y / height) * 2 - 1)
+            if (result.startWorld && result.endWorld) {
+                sectionPlaneManager.addFromWorldLine(result.startWorld, result.endWorld)
+            } else {
+                const w = containerRef.current?.clientWidth || overlayRef.current.clientWidth
+                const h = containerRef.current?.clientHeight || overlayRef.current.clientHeight
+                const startNDC = result.startNDC ?? {
+                    x: (startPoint.x / w) * 2 - 1,
+                    y: -((startPoint.y / h) * 2 - 1)
+                }
+                const endNDC = result.endNDC ?? {
+                    x: (result.screenCoords.x / w) * 2 - 1,
+                    y: -((result.screenCoords.y / h) * 2 - 1)
+                }
+                sectionPlaneManager.addFromScreenLine(startNDC, endNDC, camera)
             }
-            const endNDC = {
-                x: (constrainedCoords.x / width) * 2 - 1,
-                y: -((constrainedCoords.y / height) * 2 - 1)
-            }
-
-            sectionPlaneManager.addFromScreenLine(startNDC, endNDC, camera)
             onSectionEnabled()
         }
 

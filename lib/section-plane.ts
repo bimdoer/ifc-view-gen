@@ -142,6 +142,23 @@ export class SectionPlane {
     }
 
     /**
+     * Set vertical section plane from world positions (exact 90°/180° in world XZ, no projection distortion)
+     */
+    setFromWorldLine(startWorld: THREE.Vector3, endWorld: THREE.Vector3): void {
+        const dirX = endWorld.x - startWorld.x
+        const dirZ = endWorld.z - startWorld.z
+        const lenSq = dirX * dirX + dirZ * dirZ
+        if (lenSq < 0.0001) {
+            this.plane.setFromNormalAndCoplanarPoint(new THREE.Vector3(1, 0, 0), startWorld)
+        } else {
+            const normal = new THREE.Vector3(-dirZ, 0, dirX).normalize()
+            const midPoint = new THREE.Vector3().addVectors(startWorld, endWorld).multiplyScalar(0.5)
+            this.plane.setFromNormalAndCoplanarPoint(normal, midPoint)
+        }
+        this.updateHelper()
+    }
+
+    /**
      * Set horizontal section plane by direction and world Y
      * @param direction 'top' = drag from top (keep above plane), 'bottom' = drag from bottom (keep below plane)
      * @param worldY World Y coordinate for the section plane
@@ -538,6 +555,20 @@ export class SectionPlaneManager {
             this.triggerChange()
         })
         plane.setFromScreenLine(startPoint, endPoint, camera)
+        plane.enable()
+        this.planes.push(plane)
+        this.applyAll()
+        this.triggerChange()
+        return plane
+    }
+
+    addFromWorldLine(startWorld: THREE.Vector3, endWorld: THREE.Vector3): SectionPlane {
+        const plane = new SectionPlane(this.scene, this.bounds, this.renderer || undefined, true)
+        plane.setOnChangeCallback(() => {
+            this.applyAll()
+            this.triggerChange()
+        })
+        plane.setFromWorldLine(startWorld, endWorld)
         plane.enable()
         this.planes.push(plane)
         this.applyAll()
