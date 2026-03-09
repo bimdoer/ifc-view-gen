@@ -21,6 +21,7 @@ interface ViewerToolbarProps {
     onColorModeChange?: (mode: ColorMode) => void
     doorFilterActive?: boolean
     onDoorFilterChange?: (active: boolean) => void
+    onSyncIFCClassFilters?: (ifcClasses: Set<string> | null) => void
     onTriggerRender?: () => void
 }
 
@@ -140,6 +141,7 @@ export default function ViewerToolbar({
     onColorModeChange,
     doorFilterActive = false,
     onDoorFilterChange,
+    onSyncIFCClassFilters,
     onTriggerRender,
 }: ViewerToolbarProps) {
     const [expanded, setExpanded] = useState(false)
@@ -213,11 +215,13 @@ export default function ViewerToolbar({
                     await visibilityManager!.colorDoorsByGeometryType(doorContexts, false)
                 }
             })
+            onSyncIFCClassFilters?.(null)
             onDoorFilterChange?.(false)
         } else {
             await visibilityManager.enqueueFilterUpdate(async () => {
                 await visibilityManager!.filterByIFCClass(['IFCDOOR'])
             })
+            onSyncIFCClassFilters?.(new Set(['ifcdoor']))
             onDoorFilterChange?.(true)
         }
         onTriggerRender?.()

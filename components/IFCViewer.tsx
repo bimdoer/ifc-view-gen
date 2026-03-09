@@ -1507,6 +1507,13 @@ Section:
               setDoorFilterActive(active)
               triggerRenderRef.current?.()
             }}
+            onSyncIFCClassFilters={(ifcClasses) => {
+              setActiveIFCClassFilters(ifcClasses)
+              if (ifcClasses !== null) {
+                setActiveClassFilters(null)
+              }
+              triggerRenderRef.current?.()
+            }}
             onTriggerRender={() => triggerRenderRef.current?.()}
           />
 
