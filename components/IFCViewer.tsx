@@ -191,7 +191,7 @@ export default function IFCViewer() {
             if (runId !== visibilitySyncRunIdRef.current) return
             vm.setSelectedElements([])
             if (runId !== visibilitySyncRunIdRef.current) return
-            await vm.resetAllVisibility()
+            await vm.clearSelectionAndDimState()
           }
         } else {
           if (runId !== visibilitySyncRunIdRef.current) return
@@ -199,7 +199,7 @@ export default function IFCViewer() {
           if (runId !== visibilitySyncRunIdRef.current) return
           triggerRenderRef.current?.()
           if (runId !== visibilitySyncRunIdRef.current) return
-          await vm.resetAllVisibility()
+          await vm.clearSelectionAndDimState()
         }
         if (runId !== visibilitySyncRunIdRef.current) return
         triggerRenderRef.current?.()

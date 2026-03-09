@@ -239,6 +239,68 @@ export class ElementVisibilityManager {
     }
 
     /**
+     * Re-apply visibility from active filters (storey, type, IFC class, hidden).
+     * Does not touch selectedElements, dimmedElements, or isolatedElements.
+     */
+    private async reapplyVisibilityFromFilters(): Promise<void> {
+        if (this.allModelIds.length === 0) {
+            await this.cacheAllModelIds()
+        }
+
+        if (this.storeyFilterIds && this.storeyFilterIds.length > 0) {
+            await this.fragmentsModel.setVisible(this.allModelIds, false)
+            await this.fragmentsModel.setVisible(this.storeyFilterIds, true)
+        } else if (this.typeFilters.size > 0) {
+            const visibleIds: number[] = []
+            for (const [id, element] of this.elements.entries()) {
+                const productType = (element.productTypeName || '').toLowerCase()
+                if (productType && this.typeFilters.has(productType) && !this.hiddenElements.has(id)) {
+                    visibleIds.push(id)
+                }
+            }
+            await this.fragmentsModel.setVisible(this.allModelIds, false)
+            if (visibleIds.length > 0) {
+                await this.fragmentsModel.setVisible(visibleIds, true)
+            }
+        } else if (this.ifcClassFilters.size > 0) {
+            const visibleIds: number[] = []
+            for (const [id, element] of this.elements.entries()) {
+                const ifcClass = (element.typeName || '').toLowerCase()
+                if (ifcClass && this.ifcClassFilters.has(ifcClass) && !this.hiddenElements.has(id)) {
+                    visibleIds.push(id)
+                }
+            }
+            await this.fragmentsModel.setVisible(this.allModelIds, false)
+            if (visibleIds.length > 0) {
+                await this.fragmentsModel.setVisible(visibleIds, true)
+            }
+        } else {
+            await this.fragmentsModel.resetVisible()
+        }
+
+        if (this.hiddenElements.size > 0) {
+            await this.fragmentsModel.setVisible(Array.from(this.hiddenElements), false)
+        }
+    }
+
+    /**
+     * Clear only dock-driven visibility state (selection, dim, isolate) without
+     * affecting storey/type/IFC class filters. Re-applies visibility from remaining filters.
+     */
+    async clearSelectionAndDimState(): Promise<void> {
+        for (const localId of this.selectedElements) {
+            this.removeHighlightMesh(localId)
+        }
+        this.selectedElements.clear()
+        this.dimmedElements = null
+        this.isolatedElements = null
+
+        await this.fragmentsModel.resetHighlight()
+        await this.reapplyVisibilityFromFilters()
+        await this.applyChanges()
+    }
+
+    /**
      * Filter by product type names - hides ALL model elements except matching types
      * Only filters by productTypeName (from IfcDoorType, etc.) - NOT IFC classes
      */
