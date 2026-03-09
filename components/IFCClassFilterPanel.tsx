@@ -82,7 +82,12 @@ export default function IFCClassFilterPanel({
       const pending = pendingFiltersRef.current
       pendingFiltersRef.current = undefined
       if (pending !== undefined) {
-        applyFilter(pending)
+        try {
+          await applyFilter(pending)
+        } catch (err) {
+          console.error('IFCClassFilter: Error applying pending filter:', err)
+          throw err
+        }
       }
     }
   }
