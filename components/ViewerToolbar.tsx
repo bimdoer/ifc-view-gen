@@ -246,6 +246,7 @@ export default function ViewerToolbar({
                 <button
                     onClick={() => navigationManager?.setViewPreset('iso')}
                     title="Center model"
+                    aria-label="Center model"
                     style={roundButtonStyle(false)}
                 >
                     <CenterIcon size={24} />
@@ -261,6 +262,8 @@ export default function ViewerToolbar({
                     <button
                         onClick={handleScissorsClick}
                         title="Section"
+                        aria-label="Section"
+                        aria-pressed={isActive}
                         style={roundButtonStyle(isActive)}
                     >
                         <ScissorsIcon size={24} />
@@ -270,6 +273,8 @@ export default function ViewerToolbar({
                             <button
                                 onClick={() => handleModeSelect('line')}
                                 title="Draw section line (2 clicks)"
+                                aria-label="Draw section line (2 clicks)"
+                                aria-pressed={sectionMode === 'line'}
                                 style={roundButtonStyle(sectionMode === 'line')}
                             >
                                 <LineIcon size={24} />
@@ -277,6 +282,8 @@ export default function ViewerToolbar({
                             <button
                                 onClick={() => handleModeSelect('drag-top')}
                                 title="Drag section from top"
+                                aria-label="Drag section from top"
+                                aria-pressed={sectionMode === 'drag-top'}
                                 style={roundButtonStyle(sectionMode === 'drag-top')}
                             >
                                 <ArrowDownIcon size={24} />
@@ -284,6 +291,8 @@ export default function ViewerToolbar({
                             <button
                                 onClick={() => handleModeSelect('drag-bottom')}
                                 title="Drag section from bottom"
+                                aria-label="Drag section from bottom"
+                                aria-pressed={sectionMode === 'drag-bottom'}
                                 style={roundButtonStyle(sectionMode === 'drag-bottom')}
                             >
                                 <ArrowUpIcon size={24} />
@@ -294,6 +303,7 @@ export default function ViewerToolbar({
                         <button
                             onClick={handleResetAll}
                             title="Show full model [R]"
+                            aria-label="Show full model"
                             style={roundButtonStyle(false)}
                         >
                             <span style={{ fontSize: '24px', lineHeight: 1 }}>↺</span>
@@ -311,6 +321,8 @@ export default function ViewerToolbar({
                     <button
                         onClick={handleColorClick}
                         title="Color"
+                        aria-label="Color"
+                        aria-pressed={isColorActive}
                         style={roundButtonStyle(isColorActive)}
                     >
                         <PaintIcon size={24} />
@@ -328,6 +340,8 @@ export default function ViewerToolbar({
                 <button
                     onClick={handleDoorFilterClick}
                     title="Nur IfcDoors anzeigen"
+                    aria-label="Door filter"
+                    aria-pressed={doorFilterActive}
                     style={roundButtonStyle(doorFilterActive)}
                 >
                     <DoorIcon size={24} />
