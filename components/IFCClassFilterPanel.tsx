@@ -69,6 +69,7 @@ export default function IFCClassFilterPanel({
 
     isApplying.current = true
     let pending: Set<string> | null | undefined
+    let capturedError: unknown
     try {
       await visibilityManager.enqueueFilterUpdate(async () => {
         if (classes === null) {
@@ -80,6 +81,8 @@ export default function IFCClassFilterPanel({
           await visibilityManager!.filterByIFCClass(classesToShow)
         }
       })
+    } catch (err) {
+      capturedError = err
     } finally {
       isApplying.current = false
       pending = pendingFiltersRef.current
@@ -87,6 +90,9 @@ export default function IFCClassFilterPanel({
     }
     if (pending !== undefined) {
       await applyFilter(pending)
+    }
+    if (capturedError !== undefined) {
+      throw capturedError
     }
   }
 
