@@ -205,7 +205,11 @@ export default function IFCViewer() {
   // - Dim/reset only when NOT in color-by-geometry or door filter mode
   useEffect(() => {
     const vm = visibilityManagerRef.current
-    if (!vm || doorContexts.length === 0) return
+    if (!vm) return
+    if (doorContexts.length === 0) {
+      vm.clearAllHighlights()
+      return
+    }
 
     const selectedExpressIds = dockSelectedDoorIds.size > 0
       ? doorContexts
