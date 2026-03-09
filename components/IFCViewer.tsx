@@ -221,7 +221,7 @@ export default function IFCViewer() {
 
     // Dim/reset only when not in color-by-geometry or door filter mode
     if (colorMode === 'geometry-type' || doorFilterActive) {
-      triggerRenderRef.current?.()
+      vm.clearSelectionAndDimState().then(() => triggerRenderRef.current?.())
       return
     }
 
