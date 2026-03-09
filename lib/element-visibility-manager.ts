@@ -233,7 +233,7 @@ export class ElementVisibilityManager {
      * excluding hiddenElements. Used by all visibility paths.
      */
     private computeVisibleIdsFromFilters(): number[] {
-        let ids = this.storeyFilterIds && this.storeyFilterIds.length > 0
+        let ids = this.storeyFilterIds != null
             ? [...this.storeyFilterIds]
             : [...this.allModelIds]
 
