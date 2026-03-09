@@ -552,6 +552,7 @@ export class SectionPlaneManager {
         plane.enable()
         this.planes.push(plane)
         this.activeIndex = this.planes.length - 1
+        this.updateHighlights()
         this.applyAll()
         this.triggerChange()
         return plane
@@ -567,6 +568,7 @@ export class SectionPlaneManager {
         plane.enable()
         this.planes.push(plane)
         this.activeIndex = this.planes.length - 1
+        this.updateHighlights()
         this.applyAll()
         this.triggerChange()
         return plane
@@ -582,6 +584,7 @@ export class SectionPlaneManager {
         plane.enable()
         this.planes.push(plane)
         this.activeIndex = this.planes.length - 1
+        this.updateHighlights()
         this.applyAll()
         this.triggerChange()
         return plane
