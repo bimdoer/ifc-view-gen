@@ -508,6 +508,7 @@ export class SectionPlaneManager {
     setBounds(bounds: THREE.Box3): void {
         this.bounds.copy(bounds)
         this.planes.forEach(p => p.setBounds(bounds))
+        this.triggerChange()
     }
 
     private triggerChange(): void {
