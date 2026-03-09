@@ -47,18 +47,53 @@ export default function SectionDrawOverlay({
         }
     }, [containerRef])
 
-    // Snap to 0°, 90°, 180°, 270° on XY plane when Shift is held
+    // Snap to 0°, 90°, 180°, 270° in world XY plane when Shift is held (independent of camera rotation)
     const SNAP_ANGLES = [0, Math.PI / 2, Math.PI, -Math.PI / 2] as const
 
-    const getConstrainedPoint = useCallback((start: { x: number; y: number }, current: { x: number; y: number }, shift: boolean) => {
-        if (!shift) return current
+    const getConstrainedPoint = useCallback((
+        start: { x: number; y: number },
+        current: { x: number; y: number },
+        shift: boolean,
+        width: number,
+        height: number
+    ) => {
+        if (!shift || !camera || !sectionPlaneManager) return current
 
         const dx = current.x - start.x
         const dy = current.y - start.y
         const length = Math.sqrt(dx * dx + dy * dy)
         if (length < 0.001) return current
 
-        const angle = Math.atan2(dy, dx)
+        // Convert screen points to world points on the view plane through model center
+        const bounds = sectionPlaneManager.getBounds()
+        const boundsCenter = bounds.getCenter(new THREE.Vector3())
+        const viewDir = new THREE.Vector3()
+        camera.getWorldDirection(viewDir)
+        const viewPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(viewDir, boundsCenter)
+
+        const toWorld = (px: number, py: number) => {
+            const ndcX = (px / width) * 2 - 1
+            const ndcY = -((py / height) * 2 - 1)
+            const near = new THREE.Vector3(ndcX, ndcY, 0).unproject(camera)
+            const far = new THREE.Vector3(ndcX, ndcY, 1).unproject(camera)
+            const dir = new THREE.Vector3().subVectors(far, near).normalize()
+            const ray = new THREE.Ray(near, dir)
+            const point = new THREE.Vector3()
+            ray.intersectPlane(viewPlane, point)
+            return point
+        }
+
+        const startWorld = toWorld(start.x, start.y)
+        const currentWorld = toWorld(current.x, current.y)
+        // World horizontal plane is XZ (Y-up). Section plane is vertical, so constrain in XZ.
+        const dirXZ = new THREE.Vector2(
+            currentWorld.x - startWorld.x,
+            currentWorld.z - startWorld.z
+        )
+        const lenXZ = dirXZ.length()
+        if (lenXZ < 0.001) return current
+
+        const angle = Math.atan2(dirXZ.y, dirXZ.x)
         const snapAngle = SNAP_ANGLES.reduce((best, a) => {
             let diffBest = Math.abs(angle - best)
             if (diffBest > Math.PI) diffBest = 2 * Math.PI - diffBest
@@ -67,11 +102,17 @@ export default function SectionDrawOverlay({
             return diffA < diffBest ? a : best
         })
 
+        const endWorld = startWorld.clone().add(new THREE.Vector3(
+            Math.cos(snapAngle) * lenXZ,
+            0,
+            Math.sin(snapAngle) * lenXZ
+        ))
+        const ndc = endWorld.clone().project(camera)
         return {
-            x: start.x + length * Math.cos(snapAngle),
-            y: start.y + length * Math.sin(snapAngle),
+            x: ((ndc.x + 1) / 2) * width,
+            y: (1 - ndc.y) / 2 * height,
         }
-    }, [])
+    }, [camera, sectionPlaneManager])
 
     const handleMouseDown = (e: React.MouseEvent) => {
         e.preventDefault()
@@ -91,8 +132,9 @@ export default function SectionDrawOverlay({
         if (isDrawing) {
             e.preventDefault()
             e.stopPropagation()
-            // Apply constraint if Shift is held
-            const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld)
+            const width = containerRef.current?.clientWidth || overlayRef.current?.clientWidth || 1
+            const height = containerRef.current?.clientHeight || overlayRef.current?.clientHeight || 1
+            const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld, width, height)
             setCurrentPoint(constrainedCoords)
         }
     }
@@ -103,8 +145,9 @@ export default function SectionDrawOverlay({
         e.stopPropagation()
 
         const coords = getRelativeCoords(e)
-        // Apply constraint if Shift is held
-        const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld)
+        const width = containerRef.current?.clientWidth || overlayRef.current?.clientWidth || 1
+        const height = containerRef.current?.clientHeight || overlayRef.current?.clientHeight || 1
+        const constrainedCoords = getConstrainedPoint(startPoint, coords, shiftHeld, width, height)
         setCurrentPoint(constrainedCoords)
         setIsDrawing(false)
 

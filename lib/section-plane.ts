@@ -274,12 +274,18 @@ export class SectionPlane {
                 .addScaledVector(u, centerU)
                 .addScaledVector(v, centerV)
 
+            // Offset along normal to avoid Z-fighting with clipped model geometry (polygonOffset
+            // does not work with logarithmicDepthBuffer). Push fill slightly in front of cut plane.
+            const size = this.originalBounds.getSize(new THREE.Vector3())
+            const maxDim = Math.max(size.x, size.y, size.z, 1)
+            meshCenter.addScaledVector(this.plane.normal, maxDim * 1e-5)
+
             // Transparent filled plane - limited to building bounds (width/height swapped for orientation)
             const planeGeometry = new THREE.PlaneGeometry(height, width)
             const planeMaterial = new THREE.MeshBasicMaterial({
                 color: 0x4ecdc4,
                 transparent: true,
-                opacity: 0.15,
+                opacity: 0.25,
                 side: THREE.DoubleSide,
                 depthWrite: false,
                 depthTest: true,
