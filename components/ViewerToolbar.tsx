@@ -213,29 +213,6 @@ export default function ViewerToolbar({
                 gap: '8px',
             }}
         >
-            {isSectionActive && (
-                <button
-                    onClick={handleResetAll}
-                    title="Show full model [R]"
-                    style={{
-                        width: '40px',
-                        height: '40px',
-                        borderRadius: '50%',
-                        border: '1px solid #6ee7df',
-                        backgroundColor: '#4ecdc4',
-                        color: '#1a1a1a',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontSize: '16px',
-                        transition: 'all 0.15s ease',
-                    }}
-                >
-                    ↺
-                </button>
-            )}
-
             <div
                 style={{
                     display: 'flex',
@@ -290,6 +267,15 @@ export default function ViewerToolbar({
                                 <ArrowUpIcon size={24} />
                             </button>
                         </>
+                    )}
+                    {isSectionActive && (
+                        <button
+                            onClick={handleResetAll}
+                            title="Show full model [R]"
+                            style={roundButtonStyle(false)}
+                        >
+                            <span style={{ fontSize: '24px', lineHeight: 1 }}>↺</span>
+                        </button>
                     )}
                 </div>
                 <div
