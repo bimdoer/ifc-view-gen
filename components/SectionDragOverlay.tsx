@@ -61,7 +61,7 @@ export default function SectionDragOverlay({
         const worldY = screenYToWorldY(localY)
 
         const plane = sectionPlaneManager.addByDirection(direction === 'top' ? 'bottom' : 'top', worldY)
-        plane.flip() // Start inverted per user preference
+        // No flip: drag-from-top shows below (cut top), drag-from-bottom shows above (cut bottom)
 
         setIsDragging(true)
         setCurrentY(localY)
