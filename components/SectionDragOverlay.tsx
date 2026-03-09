@@ -62,7 +62,6 @@ export default function SectionDragOverlay({
 
         const plane = sectionPlaneManager.addByDirection(direction === 'top' ? 'bottom' : 'top', worldY)
         plane.flip() // Start inverted per user preference
-        onSectionEnabled()
 
         setIsDragging(true)
         setCurrentY(localY)
@@ -92,6 +91,7 @@ export default function SectionDragOverlay({
         e.preventDefault()
         e.stopPropagation()
         setIsDragging(false)
+        onSectionEnabled()
         onComplete()
         triggerRender?.()
     }
@@ -129,6 +129,7 @@ export default function SectionDragOverlay({
             onMouseLeave={() => {
                 if (isDragging) {
                     setIsDragging(false)
+                    onSectionEnabled()
                     onComplete()
                     triggerRender?.()
                 }
