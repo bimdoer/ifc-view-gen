@@ -252,6 +252,11 @@ export class ElementVisibilityManager {
             ? [...this.storeyFilterIds]
             : [...this.allModelIds]
 
+        const isolated = this.isolatedElements
+        if (isolated) {
+            ids = ids.filter(id => isolated.has(id))
+        }
+
         if (this.typeFilters.size > 0) {
             ids = ids.filter(id => {
                 const el = this.elements.get(id)
