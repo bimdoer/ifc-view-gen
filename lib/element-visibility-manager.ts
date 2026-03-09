@@ -204,6 +204,7 @@ export class ElementVisibilityManager {
         const nonSelectedIds = visibleIds.filter(id => !selectedSet.has(id))
 
         await this.applyVisibilityFromFilters()
+        await this.fragmentsModel.resetHighlight()
 
         if (nonSelectedIds.length > 0) {
             await this.fragmentsModel.highlight(nonSelectedIds, {
