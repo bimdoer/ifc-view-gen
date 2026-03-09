@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
-import { SectionPlane } from '@/lib/section-plane'
+import { SectionPlaneManager } from '@/lib/section-plane'
 
 export type SectionDragDirection = 'top' | 'bottom'
 
@@ -11,7 +11,7 @@ interface SectionDragOverlayProps {
     direction: SectionDragDirection
     onComplete: () => void
     onSectionEnabled: () => void
-    sectionPlane: SectionPlane | null
+    sectionPlaneManager: SectionPlaneManager | null
     camera: THREE.PerspectiveCamera | null
     containerRef: React.RefObject<HTMLDivElement>
     triggerRender?: () => void
@@ -23,7 +23,7 @@ export default function SectionDragOverlay({
     direction,
     onComplete,
     onSectionEnabled,
-    sectionPlane,
+    sectionPlaneManager,
     camera,
     containerRef,
     triggerRender,
@@ -35,9 +35,9 @@ export default function SectionDragOverlay({
 
     const screenYToWorldY = useCallback(
         (screenY: number): number => {
-            if (!containerRef.current || !camera || !sectionPlane) return 0
+            if (!containerRef.current || !camera || !sectionPlaneManager) return 0
             const rect = containerRef.current.getBoundingClientRect()
-            const bounds = sectionPlane.getBounds()
+            const bounds = sectionPlaneManager.getBounds()
             const minY = bounds.min.y
             const maxY = bounds.max.y
 
@@ -47,21 +47,21 @@ export default function SectionDragOverlay({
             const t = 1 - screenY / rect.height // 0 at bottom, 1 at top
             return minY + t * (maxY - minY)
         },
-        [containerRef, camera, sectionPlane, direction]
+        [containerRef, camera, sectionPlaneManager, direction]
     )
 
     const handleMouseDown = (e: React.MouseEvent) => {
         e.preventDefault()
         e.stopPropagation()
-        if (!overlayRef.current || !sectionPlane) return
+        if (!overlayRef.current || !sectionPlaneManager) return
 
-        const rect = containerRef.current?.getBoundingClientRect() || overlayRef.current.getBoundingClientRect()
+        const rect = containerRef.current?.getBoundingClientRect() || overlayRef.current?.getBoundingClientRect()
+        if (!rect) return
         const localY = e.clientY - rect.top
         const worldY = screenYToWorldY(localY)
 
-        sectionPlane.setByDirection(direction === 'top' ? 'bottom' : 'top', worldY)
-        sectionPlane.enable()
-        sectionPlane.flip() // Start inverted per user preference
+        const plane = sectionPlaneManager.addByDirection(direction === 'top' ? 'bottom' : 'top', worldY)
+        plane.flip() // Start inverted per user preference
         onSectionEnabled()
 
         setIsDragging(true)
@@ -70,15 +70,19 @@ export default function SectionDragOverlay({
     }
 
     const handleMouseMove = (e: React.MouseEvent) => {
-        if (!isDragging || !sectionPlane) return
+        if (!isDragging || !sectionPlaneManager) return
         e.preventDefault()
         e.stopPropagation()
 
-        const rect = containerRef.current?.getBoundingClientRect() || overlayRef.current.getBoundingClientRect()
+        const rect = containerRef.current?.getBoundingClientRect() || overlayRef.current?.getBoundingClientRect()
+        if (!rect) return
         const localY = e.clientY - rect.top
         const worldY = screenYToWorldY(localY)
 
-        sectionPlane.setByDirection(direction === 'top' ? 'bottom' : 'top', worldY)
+        const lastPlane = sectionPlaneManager.getLastPlane()
+        if (lastPlane) {
+            lastPlane.setByDirection(direction === 'top' ? 'bottom' : 'top', worldY)
+        }
         setCurrentY(localY)
         triggerRender?.()
     }
@@ -97,20 +101,22 @@ export default function SectionDragOverlay({
 
         const handleKeyDown = (e: KeyboardEvent) => {
             if (e.key === 'Escape') {
+                if (isDragging) {
+                    sectionPlaneManager?.removeLast()
+                }
                 setIsDragging(false)
-                sectionPlane?.disable()
                 triggerRender?.()
                 onComplete()
             }
-            if ((e.key === 'f' || e.key === 'F') && sectionPlane?.isEnabled()) {
-                sectionPlane.flip()
+            if ((e.key === 'f' || e.key === 'F') && sectionPlaneManager?.hasAnyEnabled()) {
+                sectionPlaneManager.getLastPlane()?.flip()
                 triggerRender?.()
             }
         }
 
         document.addEventListener('keydown', handleKeyDown)
         return () => document.removeEventListener('keydown', handleKeyDown)
-    }, [active, onComplete, sectionPlane, triggerRender])
+    }, [active, onComplete, sectionPlaneManager, triggerRender, isDragging])
 
     if (!active) return null
 

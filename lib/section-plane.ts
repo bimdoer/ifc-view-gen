@@ -14,11 +14,13 @@ export class SectionPlane {
     private renderer: THREE.WebGLRenderer | null = null
     private originalBounds: THREE.Box3
     private onChangeCallback: (() => void) | null = null
+    private managed: boolean = false
 
-    constructor(scene: THREE.Scene, bounds: THREE.Box3, renderer?: THREE.WebGLRenderer) {
+    constructor(scene: THREE.Scene, bounds: THREE.Box3, renderer?: THREE.WebGLRenderer, managed = false) {
         this.scene = scene
         this.renderer = renderer || null
         this.originalBounds = bounds.clone()
+        this.managed = managed
 
         // Default plane facing up (horizontal cut)
         this.plane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0)
@@ -45,6 +47,13 @@ export class SectionPlane {
      */
     setRenderer(renderer: THREE.WebGLRenderer): void {
         this.renderer = renderer
+    }
+
+    /**
+     * Update bounds (e.g. when model changes)
+     */
+    setBounds(bounds: THREE.Box3): void {
+        this.originalBounds.copy(bounds)
     }
 
     /**
@@ -322,36 +331,37 @@ export class SectionPlane {
     offset(distance: number): void {
         this.plane.constant -= distance
         this.updateHelper()
+        this.triggerChange()
     }
 
     /**
-     * Enable section clipping
+     * Enable section clipping (when not managed, applies to renderer/materials; when managed, manager applies)
      */
     enable(): void {
         if (this.enabled) return
         this.enabled = true
 
-        // Use renderer's global clipping planes
-        if (this.renderer) {
-            this.renderer.clippingPlanes = [this.plane]
-            this.renderer.localClippingEnabled = true
+        if (!this.managed) {
+            if (this.renderer) {
+                this.renderer.clippingPlanes = [this.plane]
+                this.renderer.localClippingEnabled = true
+            }
+            this.scene.traverse((object) => {
+                if (object instanceof THREE.Mesh && object.material) {
+                    const materials = Array.isArray(object.material) ? object.material : [object.material]
+                    materials.forEach(mat => {
+                        if (mat instanceof THREE.Material) {
+                            mat.clippingPlanes = [this.plane]
+                            mat.clipShadows = true
+                            mat.needsUpdate = true
+                        }
+                    })
+                }
+            })
         }
 
-        // Also apply to materials
-        this.scene.traverse((object) => {
-            if (object instanceof THREE.Mesh && object.material) {
-                const materials = Array.isArray(object.material) ? object.material : [object.material]
-                materials.forEach(mat => {
-                    if (mat instanceof THREE.Material) {
-                        mat.clippingPlanes = [this.plane]
-                        mat.clipShadows = true
-                        mat.needsUpdate = true
-                    }
-                })
-            }
-        })
-
         this.updateHelper()
+        this.triggerChange()
     }
 
     /**
@@ -361,24 +371,23 @@ export class SectionPlane {
         if (!this.enabled) return
         this.enabled = false
 
-        // Clear renderer's clipping planes
-        if (this.renderer) {
-            this.renderer.clippingPlanes = []
-        }
-
-        // Remove from materials
-        this.scene.traverse((object) => {
-            if (object instanceof THREE.Mesh && object.material) {
-                const materials = Array.isArray(object.material) ? object.material : [object.material]
-                materials.forEach(mat => {
-                    if (mat instanceof THREE.Material) {
-                        mat.clippingPlanes = []
-                        mat.clipShadows = false
-                        mat.needsUpdate = true
-                    }
-                })
+        if (!this.managed) {
+            if (this.renderer) {
+                this.renderer.clippingPlanes = []
             }
-        })
+            this.scene.traverse((object) => {
+                if (object instanceof THREE.Mesh && object.material) {
+                    const materials = Array.isArray(object.material) ? object.material : [object.material]
+                    materials.forEach(mat => {
+                        if (mat instanceof THREE.Material) {
+                            mat.clippingPlanes = []
+                            mat.clipShadows = false
+                            mat.needsUpdate = true
+                        }
+                    })
+                }
+            })
+        }
 
         // Remove visuals
         if (this.planeMesh) {
@@ -454,4 +463,143 @@ export class SectionPlane {
     }
 }
 
+/**
+ * Manages multiple section planes - adding new sections does not remove existing ones
+ */
+export class SectionPlaneManager {
+    private planes: SectionPlane[] = []
+    private scene: THREE.Scene
+    private bounds: THREE.Box3
+    private renderer: THREE.WebGLRenderer | null = null
+    private onChangeCallback: (() => void) | null = null
 
+    constructor(scene: THREE.Scene, bounds: THREE.Box3, renderer?: THREE.WebGLRenderer) {
+        this.scene = scene
+        this.bounds = bounds.clone()
+        this.renderer = renderer || null
+    }
+
+    setRenderer(renderer: THREE.WebGLRenderer): void {
+        this.renderer = renderer
+        this.planes.forEach(p => p.setRenderer(renderer))
+    }
+
+    setOnChangeCallback(callback: () => void): void {
+        this.onChangeCallback = callback
+    }
+
+    setBounds(bounds: THREE.Box3): void {
+        this.bounds.copy(bounds)
+        this.planes.forEach(p => p.setBounds(bounds))
+    }
+
+    private triggerChange(): void {
+        this.onChangeCallback?.()
+    }
+
+    private applyAll(): void {
+        const allPlanes = this.planes
+            .filter(p => p.isEnabled())
+            .map(p => p.getPlane())
+
+        if (this.renderer) {
+            this.renderer.clippingPlanes = allPlanes
+            this.renderer.localClippingEnabled = allPlanes.length > 0
+        }
+
+        this.scene.traverse((object) => {
+            if (object instanceof THREE.Mesh && object.material) {
+                const materials = Array.isArray(object.material) ? object.material : [object.material]
+                materials.forEach(mat => {
+                    if (mat instanceof THREE.Material) {
+                        mat.clippingPlanes = allPlanes
+                        mat.clipShadows = allPlanes.length > 0
+                        mat.needsUpdate = true
+                    }
+                })
+            }
+        })
+    }
+
+    addFromScreenLine(
+        startPoint: { x: number; y: number },
+        endPoint: { x: number; y: number },
+        camera: THREE.PerspectiveCamera
+    ): SectionPlane {
+        const plane = new SectionPlane(this.scene, this.bounds, this.renderer || undefined, true)
+        plane.setOnChangeCallback(() => {
+            this.applyAll()
+            this.triggerChange()
+        })
+        plane.setFromScreenLine(startPoint, endPoint, camera)
+        plane.enable()
+        this.planes.push(plane)
+        this.applyAll()
+        this.triggerChange()
+        return plane
+    }
+
+    addByDirection(direction: 'top' | 'bottom', worldY: number): SectionPlane {
+        const plane = new SectionPlane(this.scene, this.bounds, this.renderer || undefined, true)
+        plane.setOnChangeCallback(() => {
+            this.applyAll()
+            this.triggerChange()
+        })
+        plane.setByDirection(direction, worldY)
+        plane.enable()
+        this.planes.push(plane)
+        this.applyAll()
+        this.triggerChange()
+        return plane
+    }
+
+    getPlanes(): SectionPlane[] {
+        return [...this.planes]
+    }
+
+    getLastPlane(): SectionPlane | null {
+        return this.planes.length > 0 ? this.planes[this.planes.length - 1] : null
+    }
+
+    getBounds(): THREE.Box3 {
+        return this.bounds.clone()
+    }
+
+    removeLast(): void {
+        const last = this.planes.pop()
+        if (last) {
+            last.disable()
+            this.applyAll()
+            this.triggerChange()
+        }
+    }
+
+    hasAnyEnabled(): boolean {
+        return this.planes.some(p => p.isEnabled())
+    }
+
+    clearAll(): void {
+        this.planes.forEach(p => p.disable())
+        this.planes = []
+        if (this.renderer) {
+            this.renderer.clippingPlanes = []
+        }
+        this.scene.traverse((object) => {
+            if (object instanceof THREE.Mesh && object.material) {
+                const materials = Array.isArray(object.material) ? object.material : [object.material]
+                materials.forEach(mat => {
+                    if (mat instanceof THREE.Material) {
+                        mat.clippingPlanes = []
+                        mat.clipShadows = false
+                        mat.needsUpdate = true
+                    }
+                })
+            }
+        })
+        this.triggerChange()
+    }
+
+    dispose(): void {
+        this.clearAll()
+    }
+}

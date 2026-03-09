@@ -9,7 +9,7 @@ import DoorPanel from './DoorPanel'
 import { NavigationManager } from '@/lib/navigation-manager'
 import { extractSpatialStructure, getStoreyElementIdsByNames, type SpatialNode } from '@/lib/spatial-structure'
 import { ElementVisibilityManager } from '@/lib/element-visibility-manager'
-import { SectionPlane } from '@/lib/section-plane'
+import { SectionPlaneManager } from '@/lib/section-plane'
 import ViewerToolbar, { type SectionMode, type ColorMode } from './ViewerToolbar'
 import ZoomWindowOverlay from './ZoomWindowOverlay'
 import SectionDrawOverlay from './SectionDrawOverlay'
@@ -269,7 +269,7 @@ export default function IFCViewer() {
   // Navigation and performance systems
   const navigationManagerRef = useRef<NavigationManager | null>(null)
   const visibilityManagerRef = useRef<ElementVisibilityManager | null>(null)
-  const sectionPlaneRef = useRef<SectionPlane | null>(null)
+  const sectionPlaneManagerRef = useRef<SectionPlaneManager | null>(null)
   const batchProcessorVisibleRef = useRef(false)
   const fragmentsManagerRef = useRef<any>(null) // Fragments manager for update() in render loop
   const triggerRenderRef = useRef<() => void>(() => { }) // Function to trigger a render
@@ -536,9 +536,9 @@ export default function IFCViewer() {
         setZoomWindowActive(false)
       }
 
-      // F key to flip section direction
-      if ((e.key === 'f' || e.key === 'F') && sectionPlaneRef.current) {
-        sectionPlaneRef.current.flip()
+      // F key to flip section direction (only when a section exists)
+      if ((e.key === 'f' || e.key === 'F') && sectionPlaneManagerRef.current?.hasAnyEnabled()) {
+        sectionPlaneManagerRef.current.getLastPlane()?.flip()
       }
     }
     window.addEventListener('keydown', handleKeyDown)
@@ -564,8 +564,8 @@ export default function IFCViewer() {
   // Reset view - clears all sections and shows full model
   const handleResetView = () => {
     // Clear section plane
-    if (sectionPlaneRef.current) {
-      sectionPlaneRef.current.disable()
+    if (sectionPlaneManagerRef.current) {
+      sectionPlaneManagerRef.current.clearAll()
     }
     // Reset visibility manager
     if (visibilityManagerRef.current) {
@@ -714,19 +714,17 @@ export default function IFCViewer() {
         setSpatialStructure(spatialRoot)
         spatialStructureRef.current = spatialRoot // Store in ref for immediate access
 
-        // Initialize section plane (for line drawing)
+        // Initialize section plane manager (supports multiple sections)
         const modelBounds = new THREE.Box3().setFromObject(group)
         if (sceneRef.current && rendererRef.current) {
-          const sectionPlane = new SectionPlane(
+          sectionPlaneManagerRef.current?.dispose()
+          const manager = new SectionPlaneManager(
             sceneRef.current,
             modelBounds,
             rendererRef.current
           )
-          // Set callback to trigger render when section changes (e.g., flip)
-          sectionPlane.setOnChangeCallback(() => {
-            triggerRenderRef.current()
-          })
-          sectionPlaneRef.current = sectionPlane
+          manager.setOnChangeCallback(() => triggerRenderRef.current())
+          sectionPlaneManagerRef.current = manager
         }
 
         // Focus camera on the model geometry (accounting for visible canvas area)
@@ -1025,7 +1023,7 @@ Section:
             setIsSectionActive(true)
             triggerRenderRef.current() // Force render to show section
           }}
-          sectionPlane={sectionPlaneRef.current}
+          sectionPlaneManager={sectionPlaneManagerRef.current}
           camera={cameraRef.current}
           scene={sceneRef.current}
           containerRef={containerRef}
@@ -1042,7 +1040,7 @@ Section:
             setIsSectionActive(true)
             triggerRenderRef.current()
           }}
-          sectionPlane={sectionPlaneRef.current}
+          sectionPlaneManager={sectionPlaneManagerRef.current}
           camera={cameraRef.current}
           containerRef={containerRef}
           triggerRender={triggerRenderRef.current}
@@ -1052,7 +1050,7 @@ Section:
         {/* Section Adjust Overlay - Shift+drag to move section when active */}
         <SectionAdjustOverlay
           active={isSectionActive && sectionMode === 'off'}
-          sectionPlane={sectionPlaneRef.current}
+          sectionPlaneManager={sectionPlaneManagerRef.current}
           containerRef={containerRef}
           triggerRender={triggerRenderRef.current}
           rightPaletteOffsetPx={showBatchProcessor && doorContexts.length > 0 ? DOCK_RIGHT_OFFSET_PX : 0}
@@ -1436,8 +1434,10 @@ Section:
           <ViewerToolbar
             navigationManager={navigationManagerRef.current}
             onSectionModeChange={(mode) => {
-              if (sectionPlaneRef.current) sectionPlaneRef.current.disable()
-              if (mode === 'off') setIsSectionActive(false)
+              if (mode === 'off' && sectionPlaneManagerRef.current) {
+                sectionPlaneManagerRef.current.clearAll()
+                setIsSectionActive(false)
+              }
               setSectionMode(mode)
               triggerRenderRef.current()
             }}

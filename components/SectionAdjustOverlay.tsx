@@ -2,11 +2,11 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
-import { SectionPlane } from '@/lib/section-plane'
+import { SectionPlaneManager } from '@/lib/section-plane'
 
 interface SectionAdjustOverlayProps {
     active: boolean
-    sectionPlane: SectionPlane | null
+    sectionPlaneManager: SectionPlaneManager | null
     containerRef: React.RefObject<HTMLDivElement>
     triggerRender?: () => void
     rightPaletteOffsetPx?: number
@@ -14,7 +14,7 @@ interface SectionAdjustOverlayProps {
 
 export default function SectionAdjustOverlay({
     active,
-    sectionPlane,
+    sectionPlaneManager,
     containerRef,
     triggerRender,
     rightPaletteOffsetPx = 0,
@@ -24,7 +24,7 @@ export default function SectionAdjustOverlay({
     const lastYRef = useRef(0)
 
     const handlePointerDown = (e: React.PointerEvent) => {
-        if (!active || !sectionPlane?.isEnabled() || !e.shiftKey) return
+        if (!active || !sectionPlaneManager?.hasAnyEnabled() || !e.shiftKey) return
         e.preventDefault()
         e.stopPropagation()
         lastYRef.current = e.clientY
@@ -33,7 +33,8 @@ export default function SectionAdjustOverlay({
 
     const handlePointerMove = useCallback(
         (e: PointerEvent) => {
-            if (!isDragging || !sectionPlane) return
+            const plane = sectionPlaneManager?.getLastPlane()
+            if (!isDragging || !plane) return
             if (!e.shiftKey) {
                 setIsDragging(false)
                 return
@@ -45,16 +46,16 @@ export default function SectionAdjustOverlay({
             const rect = containerRef.current?.getBoundingClientRect()
             if (!rect) return
 
-            const bounds = sectionPlane.getBounds()
+            const bounds = plane.getBounds()
             const size = bounds.getSize(new THREE.Vector3())
             const maxDim = Math.max(size.x, size.y, size.z)
             const sensitivity = (maxDim / rect.height) * 2
             const offsetDelta = deltaY * sensitivity
 
-            sectionPlane.offset(offsetDelta)
+            plane.offset(offsetDelta)
             triggerRender?.()
         },
-        [isDragging, sectionPlane, containerRef, triggerRender]
+        [isDragging, sectionPlaneManager, containerRef, triggerRender]
     )
 
     const handlePointerUp = useCallback(() => {

@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import * as THREE from 'three'
-import { SectionPlane } from '@/lib/section-plane'
+import { SectionPlaneManager } from '@/lib/section-plane'
 
 type SectionMode = 'line'
 
@@ -11,7 +11,7 @@ interface SectionDrawOverlayProps {
     mode: SectionMode
     onComplete: () => void
     onSectionEnabled: () => void  // Called when a section is successfully created
-    sectionPlane: SectionPlane | null
+    sectionPlaneManager: SectionPlaneManager | null
     camera: THREE.PerspectiveCamera | null
     scene: THREE.Scene | null
     containerRef: React.RefObject<HTMLDivElement>  // Canvas container for dimension matching
@@ -24,7 +24,7 @@ export default function SectionDrawOverlay({
     mode,
     onComplete,
     onSectionEnabled,
-    sectionPlane,
+    sectionPlaneManager,
     camera,
     scene,
     containerRef,
@@ -114,7 +114,7 @@ export default function SectionDrawOverlay({
         const length = Math.sqrt(dx * dx + dy * dy)
 
         // Only create section if line is long enough
-        if (length > 30 && sectionPlane && camera && overlayRef.current) {
+        if (length > 30 && sectionPlaneManager && camera && overlayRef.current) {
             // Use canvas container dimensions to match camera projection exactly
             const width = containerRef.current?.clientWidth || overlayRef.current.clientWidth
             const height = containerRef.current?.clientHeight || overlayRef.current.clientHeight
@@ -128,8 +128,7 @@ export default function SectionDrawOverlay({
                 y: -((constrainedCoords.y / height) * 2 - 1)
             }
 
-            sectionPlane.setFromScreenLine(startNDC, endNDC, camera)
-            sectionPlane.enable()
+            sectionPlaneManager.addFromScreenLine(startNDC, endNDC, camera)
             onSectionEnabled()
         }
 
@@ -153,8 +152,8 @@ export default function SectionDrawOverlay({
                 setShiftHeld(true)
             }
             // F to flip section
-            if ((e.key === 'f' || e.key === 'F') && sectionPlane?.isEnabled()) {
-                sectionPlane.flip()
+            if ((e.key === 'f' || e.key === 'F') && sectionPlaneManager?.hasAnyEnabled()) {
+                sectionPlaneManager.getLastPlane()?.flip()
             }
         }
 
@@ -170,7 +169,7 @@ export default function SectionDrawOverlay({
             document.removeEventListener('keydown', handleKeyDown)
             document.removeEventListener('keyup', handleKeyUp)
         }
-    }, [active, onComplete, sectionPlane, triggerRender])
+    }, [active, onComplete, sectionPlaneManager, triggerRender])
 
     // Reset shift state when overlay becomes inactive
     useEffect(() => {
