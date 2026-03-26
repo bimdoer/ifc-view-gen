@@ -53,7 +53,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     height: 1000,
     margin: 0.5,
     doorColor: '#333333',
-    wallColor: '#888888',
+    wallColor: '#5B7DB1',
     deviceColor: '#CC0000',
     lineWidth: 1.5,
     lineColor: '#000000',
@@ -62,6 +62,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     showLabels: true,
     fontSize: 14,
     fontFamily: 'Arial',
+    wallRevealSide: 0.12,
+    wallRevealTop: 0.04,
   })
 
   // Determine which doors to process based on mode
@@ -327,6 +329,25 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
         } else {
           svg = await renderDoorElevationSVG(context, view === 'back', options)
         }
+
+        if (process.env.NODE_ENV === 'development') {
+          console.info('[door-preview-debug]', {
+            source: 'BatchProcessor',
+            doorId: context.doorId,
+            view,
+            wallColor: options.wallColor,
+            doorColor: options.doorColor,
+            hostWallId: context.hostWall?.expressID ?? null,
+            wallBoundingBox: Boolean(context.hostWall?.boundingBox),
+            detailedDoorMeshes: context.detailedGeometry?.doorMeshes.length ?? 0,
+            detailedWallMeshes: context.detailedGeometry?.wallMeshes.length ?? 0,
+            svgIncludesWallColor: Boolean(options.wallColor && svg.includes(options.wallColor)),
+            svgIncludesDoorColor: Boolean(options.doorColor && svg.includes(options.doorColor)),
+            svgDoorFillCount: options.doorColor ? (svg.match(new RegExp(options.doorColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
+            svgWallFillCount: options.wallColor ? (svg.match(new RegExp(options.wallColor.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0,
+          })
+        }
+
         setModalImage({ svg, doorId: context.doorId, view })
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to render SVG')
@@ -456,7 +477,7 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
             <label>Wall Color</label>
             <input
               type="color"
-              value={options.wallColor || '#555555'}
+              value={options.wallColor || '#5B7DB1'}
               onChange={(e) => setOptions({ ...options, wallColor: e.target.value })}
             />
           </div>
@@ -496,6 +517,28 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               step="0.1"
               value={options.margin || 0.5}
               onChange={(e) => setOptions({ ...options, margin: parseFloat(e.target.value) })}
+            />
+          </div>
+          <div className="control-group">
+            <label>Wall Sides %</label>
+            <input
+              type="number"
+              min="0"
+              max="50"
+              step="1"
+              value={Math.round((options.wallRevealSide ?? 0.12) * 100)}
+              onChange={(e) => setOptions({ ...options, wallRevealSide: parseFloat(e.target.value) / 100 })}
+            />
+          </div>
+          <div className="control-group">
+            <label>Wall Top %</label>
+            <input
+              type="number"
+              min="0"
+              max="50"
+              step="1"
+              value={Math.round((options.wallRevealTop ?? 0.04) * 100)}
+              onChange={(e) => setOptions({ ...options, wallRevealTop: parseFloat(e.target.value) / 100 })}
             />
           </div>
           <div className="control-group">
