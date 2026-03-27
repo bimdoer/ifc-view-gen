@@ -60,6 +60,8 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
     showFills: true,
     showLegend: true,
     showLabels: true,
+    legendTitleFontSize: 11,
+    legendItemFontSize: 11,
     fontSize: 14,
     fontFamily: 'Arial',
     wallRevealSide: 0.12,
@@ -550,6 +552,28 @@ export default function BatchProcessor({ doorContexts, onComplete, modelSource }
               />
               Show Legend
             </label>
+          </div>
+          <div className="control-group">
+            <label>Legend title (px)</label>
+            <input
+              type="number"
+              min={6}
+              max={48}
+              step={1}
+              value={options.legendTitleFontSize ?? 11}
+              onChange={(e) => setOptions({ ...options, legendTitleFontSize: parseInt(e.target.value, 10) || 11 })}
+            />
+          </div>
+          <div className="control-group">
+            <label>Legend items (px)</label>
+            <input
+              type="number"
+              min={6}
+              max={48}
+              step={1}
+              value={options.legendItemFontSize ?? 11}
+              onChange={(e) => setOptions({ ...options, legendItemFontSize: parseInt(e.target.value, 10) || 11 })}
+            />
           </div>
           <div className="control-group">
             <label>

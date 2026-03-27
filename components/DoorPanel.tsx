@@ -60,6 +60,8 @@ export default function DoorPanel({
     showFills: true,
     showLegend: true,
     showLabels: true,
+    legendTitleFontSize: 11,
+    legendItemFontSize: 11,
     fontSize: 14,
     fontFamily: 'Arial',
     wallRevealSide: 0.12,
@@ -479,11 +481,44 @@ export default function DoorPanel({
               Show Legend
             </label>
           </div>
+          <div className="option-row">
+            <label>Legend title px</label>
+            <input
+              type="number"
+              min={6}
+              max={48}
+              step={1}
+              value={options.legendTitleFontSize ?? 11}
+              onChange={(e) => setOptions({ ...options, legendTitleFontSize: parseInt(e.target.value, 10) || 11 })}
+            />
+          </div>
+          <div className="option-row">
+            <label>Legend items px</label>
+            <input
+              type="number"
+              min={6}
+              max={48}
+              step={1}
+              value={options.legendItemFontSize ?? 11}
+              onChange={(e) => setOptions({ ...options, legendItemFontSize: parseInt(e.target.value, 10) || 11 })}
+            />
+          </div>
           <div className="option-row checkbox">
             <label>
               <input type="checkbox" checked={options.showLabels} onChange={(e) => setOptions({ ...options, showLabels: e.target.checked })} />
               Show Labels
             </label>
+          </div>
+          <div className="option-row">
+            <label>Labels px</label>
+            <input
+              type="number"
+              min={8}
+              max={48}
+              step={1}
+              value={options.fontSize ?? 14}
+              onChange={(e) => setOptions({ ...options, fontSize: parseInt(e.target.value, 10) || 14 })}
+            />
           </div>
         </div>
 
@@ -584,7 +619,7 @@ export default function DoorPanel({
           display: flex;
           flex-direction: column;
           height: 100%;
-          background: #2a2a2a;
+          background: #1a1a1a;
           color: #fff;
           font-size: 13px;
         }
@@ -594,8 +629,8 @@ export default function DoorPanel({
           justify-content: space-between;
           align-items: center;
           padding: 12px 16px;
-          border-bottom: 1px solid #444;
-          background: #333;
+          border-bottom: 1px solid #333;
+          background: #1a1a1a;
         }
 
         .header-title {
@@ -653,9 +688,9 @@ export default function DoorPanel({
         .selection-controls {
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 12px;
           padding: 12px 16px;
-          background: #333;
+          background: #1a1a1a;
           font-size: 11px;
           color: #888;
         }
@@ -667,18 +702,18 @@ export default function DoorPanel({
 
         .selection-hint {
           font-size: 11px;
-          line-height: 1.35;
+          line-height: 1.5;
           color: #888;
         }
 
         .export-section {
-          border-top: 1px solid #444;
+          border-top: 1px solid #333;
           padding: 12px 16px;
-          background: #333;
+          background: #1a1a1a;
         }
 
         .style-options-title {
-          margin: 0 0 4px;
+          margin: 0 0 10px;
           font-size: 12px;
           font-weight: 600;
           color: #aaa;
@@ -689,20 +724,33 @@ export default function DoorPanel({
         .style-options {
           display: grid;
           grid-template-columns: 1fr 1fr;
-          gap: 8px;
+          gap: 11px 12px;
           padding: 8px 0 12px;
         }
 
         .option-row {
           display: flex;
           align-items: center;
-          gap: 8px;
+          gap: 14px;
         }
 
-        .option-row label {
+        .option-row:not(.checkbox) {
+          width: 100%;
+          min-width: 0;
+        }
+
+        .option-row:not(.checkbox) label {
           font-size: 11px;
           color: #888;
-          min-width: 50px;
+          min-width: 0;
+          flex: 1;
+          text-align: left;
+        }
+
+        .option-row:not(.checkbox) input[type="color"],
+        .option-row:not(.checkbox) input[type="number"] {
+          flex-shrink: 0;
+          margin-left: auto;
         }
 
         .option-row input[type="color"] {
@@ -714,13 +762,25 @@ export default function DoorPanel({
         }
 
         .option-row input[type="number"] {
-          width: 60px;
-          padding: 4px 6px;
+          width: 32px;
+          height: 24px;
+          padding: 0 1px;
           background: #1a1a1a;
           border: 1px solid #444;
           border-radius: 4px;
-          color: #fff;
-          font-size: 12px;
+          color: #888;
+          font-size: 9px;
+          font-weight: 500;
+          letter-spacing: 0;
+          text-align: center;
+          box-sizing: border-box;
+          -moz-appearance: textfield;
+        }
+
+        .option-row input[type="number"]::-webkit-outer-spin-button,
+        .option-row input[type="number"]::-webkit-inner-spin-button {
+          -webkit-appearance: none;
+          margin: 0;
         }
 
         .option-row.checkbox {
@@ -732,6 +792,8 @@ export default function DoorPanel({
           align-items: center;
           gap: 6px;
           min-width: auto;
+          font-size: 11px;
+          color: #888;
         }
 
         .progress-container {

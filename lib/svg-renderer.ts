@@ -15,6 +15,10 @@ export interface SVGRenderOptions {
     showFills?: boolean
     showLegend?: boolean
     showLabels?: boolean
+    /** Pixel size for the "LEGENDE:" heading in the title block */
+    legendTitleFontSize?: number
+    /** Pixel size for legend item labels and color swatches */
+    legendItemFontSize?: number
     fontSize?: number
     fontFamily?: string
     /** Wall reveal on each side as a fraction of door width (0–0.5, default 0.12 = 12 %) */
@@ -45,6 +49,8 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     showFills: true,
     showLegend: true,
     showLabels: true,
+    legendTitleFontSize: 11,
+    legendItemFontSize: 11,
     fontSize: 14,
     fontFamily: 'Arial',
     wallRevealSide: 0.12,
@@ -937,6 +943,8 @@ function generateSVGString(
         showLabels,
         wallRevealSide,
         wallRevealTop,
+        legendTitleFontSize,
+        legendItemFontSize,
     } = options
 
     const hasDevices = renderMeta.context ? renderMeta.context.nearbyDevices.length > 0 : false
@@ -948,7 +956,8 @@ function generateSVGString(
     // Text takes about 2 lines (View/Type + Opening)
     // Legend takes about 1 line if shown
     const textLines = 3 // View, ID/Type, Opening
-    const legendHeight = showLegendActual ? (fontSize + 10) : 0
+    const legendRowPx = Math.max(legendTitleFontSize, legendItemFontSize)
+    const legendHeight = showLegendActual ? (legendRowPx + 18) : 0
 
     const titleBlockHeight = (showLabels || showLegendActual) ? (fontSize * textLines + legendHeight + 20) : 0
 
@@ -1102,7 +1111,15 @@ function renderTitleBlock(
 ): string {
     if (!context) return ''
 
-    const { fontSize, fontFamily, showLegend, showLabels, backgroundColor } = options
+    const {
+        fontSize,
+        fontFamily,
+        showLegend,
+        showLabels,
+        backgroundColor,
+        legendTitleFontSize,
+        legendItemFontSize,
+    } = options
     const padding = 15
     const startY = fullHeight - blockHeight
 
@@ -1150,13 +1167,14 @@ function renderTitleBlock(
 
     if (showLegend && (hasDevices || hasWall)) {
         currentY += 10 // Extra spacing for legend
-        const legendSize = fontSize * 0.8
+        const titlePx = legendTitleFontSize
+        const itemPx = legendItemFontSize
 
         // Group: Legend Title
-        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${legendSize}" font-weight="bold" fill="#555555">LEGENDE:</text>`
+        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${titlePx}" font-weight="bold" fill="#555555">LEGENDE:</text>`
 
         // Legend Items
-        let legendX = leftX + 80
+        let legendX = leftX + Math.max(72, titlePx * 5.5)
         const items = [
             { color: options.doorColor, text: 'Tür' },
         ]
@@ -1171,10 +1189,10 @@ function renderTitleBlock(
 
         for (const item of items) {
             // Box
-            content += `    <rect x="${legendX}" y="${currentY - legendSize + 2}" width="${legendSize}" height="${legendSize}" fill="${item.color}"/>`
+            content += `    <rect x="${legendX}" y="${currentY - itemPx + 2}" width="${itemPx}" height="${itemPx}" fill="${item.color}"/>`
             // Text
-            content += `    <text x="${legendX + legendSize + 5}" y="${currentY}" font-family="${fontFamily}" font-size="${legendSize}" fill="#000000">${item.text}</text>`
-            legendX += legendSize + item.text.length * (legendSize * 0.7) + 20
+            content += `    <text x="${legendX + itemPx + 5}" y="${currentY}" font-family="${fontFamily}" font-size="${itemPx}" fill="#000000">${item.text}</text>`
+            legendX += itemPx + item.text.length * (itemPx * 0.7) + 20
         }
     }
 
