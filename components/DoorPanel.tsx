@@ -2,9 +2,7 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import type { DoorContext } from '@/lib/door-analyzer'
-import { filterDoors } from '@/lib/door-analyzer'
 import type { ElementVisibilityManager } from '@/lib/element-visibility-manager'
-import type { NavigationManager } from '@/lib/navigation-manager'
 import JSZip from 'jszip'
 import { renderDoorViews, renderDoorElevationSVG, renderDoorPlanSVG } from '@/lib/svg-renderer'
 import type { SVGRenderOptions } from '@/lib/svg-renderer'
@@ -23,7 +21,6 @@ interface DoorPanelProps {
   /** Checkbox selection in the bottom DoorListDock — drives ZIP / Airtable export. */
   dockSelectedDoorIds: Set<string>
   visibilityManager: ElementVisibilityManager | null
-  navigationManager: NavigationManager | null
   modelSource?: string
   onComplete?: () => void
   onShowSingleDoorReady?: (showSingleDoor: ((door: DoorContext, view: 'front' | 'back' | 'plan') => void) | null) => void
@@ -37,26 +34,14 @@ export default function DoorPanel({
   doorContexts,
   dockSelectedDoorIds,
   visibilityManager,
-  navigationManager,
   modelSource,
   onComplete,
   onShowSingleDoorReady,
 }: DoorPanelProps) {
-  // Filter state
-  const [searchQuery, setSearchQuery] = useState('')
-  const [selectedStoreys, setSelectedStoreys] = useState<Set<string>>(new Set())
-  const [selectedTypes, setSelectedTypes] = useState<Set<string>>(new Set())
-  const [isolateFiltered, setIsolateFiltered] = useState(false)
-  const [dimFiltered, setDimFiltered] = useState(false)
-
-  // Collapsible sections: TYPE expanded by default, STOREY collapsed
-  const [storeyExpanded, setStoreyExpanded] = useState(false)
-  const [typeExpanded, setTypeExpanded] = useState(true)
-
-  const [hoveredDoorId, setHoveredDoorId] = useState<string | null>(null)
+  const [isolateAllDoors, setIsolateAllDoors] = useState(false)
+  const [dimAllDoors, setDimAllDoors] = useState(false)
 
   // UI state
-  const [showFilters, setShowFilters] = useState(true)
   const [showStyleOptions, setShowStyleOptions] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
@@ -68,11 +53,8 @@ export default function DoorPanel({
   const [modalImage, setModalImage] = useState<{ svg: string; doorId: string; view: string } | null>(null)
   const [showConfirmation, setShowConfirmation] = useState(false)
   const [pendingAction, setPendingAction] = useState<'download' | 'upload' | null>(null)
-  const [sortField, setSortField] = useState<'door' | 'type' | 'storey'>('door')
-  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc')
 
   // Refs
-  const listContainerRef = useRef<HTMLDivElement>(null)
   const isControllingVisibilityRef = useRef(false)
   const visibilitySyncRunIdRef = useRef(0)
   const visibilityManagerRef = useRef(visibilityManager)
@@ -97,102 +79,13 @@ export default function DoorPanel({
     wallRevealTop: 0.04,
   })
 
-  // Build additive facet counts: each facet is constrained by the other active facet(s).
-  const availableStoreys = useMemo(() => {
-    const doorsForStoreyFacet = filterDoors(doorContexts, {
-      doorTypes: Array.from(selectedTypes),
-    })
-    const storeys = new Map<string, number>()
-    doorsForStoreyFacet.forEach(door => {
-      if (door.storeyName) {
-        storeys.set(door.storeyName, (storeys.get(door.storeyName) || 0) + 1)
-      }
-    })
-    // Keep selected storeys visible even if they currently have 0 matching doors.
-    selectedStoreys.forEach(storey => {
-      if (!storeys.has(storey)) storeys.set(storey, 0)
-    })
-    return Array.from(storeys.entries()).sort((a, b) => a[0].localeCompare(b[0]))
-  }, [doorContexts, selectedTypes, selectedStoreys])
-
-  const availableTypes = useMemo(() => {
-    const doorsForTypeFacet = filterDoors(doorContexts, {
-      storeys: Array.from(selectedStoreys),
-    })
-    const types = new Map<string, number>()
-    doorsForTypeFacet.forEach(door => {
-      if (door.doorTypeName) {
-        types.set(door.doorTypeName, (types.get(door.doorTypeName) || 0) + 1)
-      }
-    })
-    // Keep selected types visible even if they currently have 0 matching doors.
-    selectedTypes.forEach(type => {
-      if (!types.has(type)) types.set(type, 0)
-    })
-    return Array.from(types.entries()).sort((a, b) => a[0].localeCompare(b[0]))
-  }, [doorContexts, selectedStoreys, selectedTypes])
-
-  // Apply filters
-  const filteredDoors = useMemo(() => {
-    let result = doorContexts
-
-    // Apply filter function
-    result = filterDoors(result, {
-      doorTypes: Array.from(selectedTypes),
-      storeys: Array.from(selectedStoreys),
-    })
-
-    // Apply search query
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase()
-      result = result.filter(door =>
-        door.doorId.toLowerCase().includes(query) ||
-        (door.door.name?.toLowerCase().includes(query)) ||
-        (door.doorTypeName?.toLowerCase().includes(query)) ||
-        (door.csetStandardCH?.alTuernummer?.toLowerCase().includes(query)) ||
-        (door.storeyName?.toLowerCase().includes(query))
-      )
-    }
-
-    return result
-  }, [doorContexts, selectedTypes, selectedStoreys, searchQuery])
-
-  // Doors to process: dock checkboxes when any; else all doors matching this panel’s filters
+  // Dock checkboxes when any; otherwise entire model door list (filter in bottom table)
   const doorsToProcess = useMemo(() => {
     if (dockSelectedDoorIds.size > 0) {
       return doorContexts.filter(d => dockSelectedDoorIds.has(d.doorId))
     }
-    return filteredDoors
-  }, [filteredDoors, doorContexts, dockSelectedDoorIds])
-
-  const getDoorLabel = useCallback((door: DoorContext) => {
-    return door.csetStandardCH?.alTuernummer
-      || door.door.name
-      || door.doorTypeName
-      || door.doorId
-  }, [])
-
-  const sortedDoors = useMemo(() => {
-    const doors = [...filteredDoors]
-    doors.sort((a, b) => {
-      const aValue =
-        sortField === 'door'
-          ? getDoorLabel(a)
-          : sortField === 'type'
-          ? (a.doorTypeName || '')
-          : (a.storeyName || '')
-      const bValue =
-        sortField === 'door'
-          ? getDoorLabel(b)
-          : sortField === 'type'
-          ? (b.doorTypeName || '')
-          : (b.storeyName || '')
-
-      const compared = aValue.localeCompare(bValue, undefined, { numeric: true, sensitivity: 'base' })
-      return sortDirection === 'asc' ? compared : -compared
-    })
-    return doors
-  }, [filteredDoors, sortField, sortDirection, getDoorLabel])
+    return doorContexts
+  }, [doorContexts, dockSelectedDoorIds])
 
   // Check Airtable OAuth auth status
   const checkAuthStatus = useCallback(() => {
@@ -245,7 +138,7 @@ export default function DoorPanel({
 
   const isAirtableReady = authStatus?.isAuthenticated === true
 
-  // Sync filtered doors with 3D view
+  // Isolate / dim all doors in the model (filtering is in the bottom dock)
   useEffect(() => {
     if (!visibilityManager) return
 
@@ -254,14 +147,14 @@ export default function DoorPanel({
 
     const run = async () => {
       try {
-        if (isolateFiltered && filteredDoors.length > 0) {
-          const doorExpressIds = filteredDoors.map(d => d.door.expressID)
+        if (isolateAllDoors && doorContexts.length > 0) {
+          const doorExpressIds = doorContexts.map(d => d.door.expressID)
           if (runId !== visibilitySyncRunIdRef.current) return
           await visibilityManager.isolateElements(doorExpressIds, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
           if (runId !== visibilitySyncRunIdRef.current) return
           isControllingVisibilityRef.current = true
-        } else if (dimFiltered && filteredDoors.length > 0) {
-          const doorExpressIds = filteredDoors.map(d => d.door.expressID)
+        } else if (dimAllDoors && doorContexts.length > 0) {
+          const doorExpressIds = doorContexts.map(d => d.door.expressID)
           if (runId !== visibilitySyncRunIdRef.current) return
           await visibilityManager.dimNonSelectedElements(doorExpressIds, 0.3, { shouldAbort: () => runId !== visibilitySyncRunIdRef.current })
           if (runId !== visibilitySyncRunIdRef.current) return
@@ -281,7 +174,7 @@ export default function DoorPanel({
     return () => {
       visibilitySyncRunIdRef.current += 1
     }
-  }, [filteredDoors, isolateFiltered, dimFiltered, visibilityManager])
+  }, [doorContexts, isolateAllDoors, dimAllDoors, visibilityManager])
 
   // Unmount-only cleanup: reset visibility state when DoorPanel unmounts
   useEffect(() => {
@@ -292,73 +185,6 @@ export default function DoorPanel({
       }
       isControllingVisibilityRef.current = false
     }
-  }, [])
-
-  // Handle hover - highlight in 3D
-  const handleDoorHover = useCallback((doorId: string | null) => {
-    setHoveredDoorId(doorId)
-
-    if (!visibilityManager) return
-
-    if (doorId === null) {
-      visibilityManager.setHoveredElement(null)
-    } else {
-      const door = doorContexts.find(d => d.doorId === doorId)
-      if (door) {
-        visibilityManager.setHoveredElement(door.door.expressID)
-      }
-    }
-  }, [doorContexts, visibilityManager])
-
-  // Handle door click - zoom to door and highlight it
-  const handleDoorClick = useCallback((door: DoorContext) => {
-    if (!navigationManager || !door.door.boundingBox) return
-
-
-    // Highlight the selected door in 3D
-    if (visibilityManager) {
-      visibilityManager.setSelectedElements([door.door.expressID])
-    }
-
-    // Zoom to door from the front view
-    navigationManager.zoomToElementFromNormal(
-      door.door.boundingBox,
-      door.normal,
-      2.5
-    )
-  }, [navigationManager, visibilityManager])
-
-  // Clear all filters
-  const clearFilters = useCallback(() => {
-    setSearchQuery('')
-    setSelectedStoreys(new Set())
-    setSelectedTypes(new Set())
-  }, [])
-
-  // Toggle storey filter
-  const toggleStorey = useCallback((storey: string) => {
-    setSelectedStoreys(prev => {
-      const next = new Set(prev)
-      if (next.has(storey)) {
-        next.delete(storey)
-      } else {
-        next.add(storey)
-      }
-      return next
-    })
-  }, [])
-
-  // Toggle type filter
-  const toggleType = useCallback((type: string) => {
-    setSelectedTypes(prev => {
-      const next = new Set(prev)
-      if (next.has(type)) {
-        next.delete(type)
-      } else {
-        next.add(type)
-      }
-      return next
-    })
   }, [])
 
   // Show single door preview
@@ -596,39 +422,24 @@ export default function DoorPanel({
     return () => document.removeEventListener('mousedown', handleClick)
   }, [showSettings])
 
-  const hasActiveFilters = selectedStoreys.size > 0 || selectedTypes.size > 0 || searchQuery.trim().length > 0
-  const toggleSort = useCallback((field: 'door' | 'type' | 'storey') => {
-    if (sortField === field) {
-      setSortDirection(prevDirection => (prevDirection === 'asc' ? 'desc' : 'asc'))
-      return
-    }
-    setSortField(field)
-    setSortDirection('asc')
-  }, [sortField])
-
-  const sortIndicator = useCallback((field: 'door' | 'type' | 'storey') => {
-    if (sortField !== field) return '↕'
-    return sortDirection === 'asc' ? '↑' : '↓'
-  }, [sortDirection, sortField])
-
   return (
     <div className="door-panel">
       {/* Header */}
       <div className="panel-header">
         <div className="header-title">
           <h2>Doors</h2>
-          <span className="door-count-badge">{filteredDoors.length}</span>
+          <span className="door-count-badge">{doorContexts.length}</span>
         </div>
         <div className="header-actions">
           <button
-            className={`icon-button ${isolateFiltered ? 'active' : ''}`}
-            aria-label={isolateFiltered ? 'Show all elements' : 'Isolate doors in 3D'}
-            aria-pressed={isolateFiltered}
+            className={`icon-button ${isolateAllDoors ? 'active' : ''}`}
+            aria-label={isolateAllDoors ? 'Show all elements' : 'Isolate all doors in 3D'}
+            aria-pressed={isolateAllDoors}
             onClick={() => {
-              setIsolateFiltered(prev => !prev)
-              if (!isolateFiltered) setDimFiltered(false)
+              setIsolateAllDoors(prev => !prev)
+              if (!isolateAllDoors) setDimAllDoors(false)
             }}
-            title={isolateFiltered ? 'Show all elements' : 'Isolate doors in 3D'}
+            title={isolateAllDoors ? 'Show all elements' : 'Isolate all doors in 3D'}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="10" />
@@ -636,29 +447,19 @@ export default function DoorPanel({
             </svg>
           </button>
           <button
-            className={`icon-button ${dimFiltered ? 'active' : ''}`}
-            aria-label={dimFiltered ? 'Show all elements' : 'Dim non-matching elements'}
-            aria-pressed={dimFiltered}
+            className={`icon-button ${dimAllDoors ? 'active' : ''}`}
+            aria-label={dimAllDoors ? 'Show all elements' : 'Dim everything except doors'}
+            aria-pressed={dimAllDoors}
             onClick={() => {
-              setDimFiltered(prev => !prev)
-              if (!dimFiltered) setIsolateFiltered(false)
+              setDimAllDoors(prev => !prev)
+              if (!dimAllDoors) setIsolateAllDoors(false)
             }}
-            title={dimFiltered ? 'Show all elements' : 'Dim non-matching elements'}
+            title={dimAllDoors ? 'Show all elements' : 'Dim everything except doors'}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <rect x="3" y="3" width="18" height="18" rx="2" opacity="0.5" />
               <rect x="7" y="7" width="10" height="10" rx="1" />
             </svg>
-          </button>
-          <button
-            className={`icon-button ${showFilters ? 'active' : ''}`}
-            onClick={() => setShowFilters(!showFilters)}
-            title="Toggle filters"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-            </svg>
-            {hasActiveFilters && <span className="filter-badge" />}
           </button>
           {/* Settings / Airtable button */}
           <div className="settings-wrapper" ref={settingsRef}>
@@ -723,197 +524,17 @@ export default function DoorPanel({
         </div>
       </div>
 
-      {/* Filter Section */}
-      {showFilters && (
-        <div className="filter-section">
-          {/* Search */}
-          <div className="search-container">
-            <svg className="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="8" />
-              <line x1="21" y1="21" x2="16.65" y2="16.65" />
-            </svg>
-            <input
-              type="text"
-              placeholder="Search doors..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="search-input"
-            />
-            {searchQuery && (
-              <button className="clear-search" onClick={() => setSearchQuery('')}>×</button>
-            )}
-          </div>
-
-          {/* Storey Filter */}
-          {availableStoreys.length > 0 && (
-            <div className="filter-group">
-              <div
-                className="filter-label collapsible"
-                onClick={() => setStoreyExpanded(!storeyExpanded)}
-                style={{ cursor: 'pointer', userSelect: 'none' }}
-              >
-                <span style={{ marginRight: '6px' }}>
-                  {storeyExpanded ? '▼' : '▶'}
-                </span>
-                Storey
-              </div>
-              {storeyExpanded && (
-                <div className="filter-chips">
-                  {availableStoreys.map(([storey, count]) => (
-                    <button
-                      key={storey}
-                      className={`filter-chip ${selectedStoreys.has(storey) ? 'active' : ''}`}
-                      onClick={() => toggleStorey(storey)}
-                    >
-                      {storey}
-                      <span className="chip-count">{count}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Type Filter */}
-          {availableTypes.length > 0 && (
-            <div className="filter-group">
-              <div
-                className="filter-label collapsible"
-                onClick={() => setTypeExpanded(!typeExpanded)}
-                style={{ cursor: 'pointer', userSelect: 'none' }}
-              >
-                <span style={{ marginRight: '6px' }}>
-                  {typeExpanded ? '▼' : '▶'}
-                </span>
-                Type
-              </div>
-              {typeExpanded && (
-                <div className="filter-chips">
-                  {availableTypes.map(([type, count]) => (
-                    <button
-                      key={type}
-                      className={`filter-chip ${selectedTypes.has(type) ? 'active' : ''}`}
-                      onClick={() => toggleType(type)}
-                    >
-                      {type}
-                      <span className="chip-count">{count}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Clear Filters */}
-          {hasActiveFilters && (
-            <button className="clear-filters" onClick={clearFilters}>
-              Clear all filters
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Export selection is driven by checkboxes in the bottom dock */}
       <div className="selection-controls">
         <div className="selection-info">
           {dockSelectedDoorIds.size > 0 ? (
             <span>{dockSelectedDoorIds.size} selected for export</span>
           ) : (
-            <span>{filteredDoors.length} doors (all matching filters)</span>
+            <span>{doorContexts.length} doors in model (export all)</span>
           )}
         </div>
         <div className="selection-hint">
-          Use checkboxes in the bottom table to choose specific doors for ZIP / Airtable.
+          Filter and sort in the bottom table. Use checkboxes to export only selected doors; with none checked, export includes every door above.
         </div>
-      </div>
-
-      {/* Door List */}
-      <div className="door-list" ref={listContainerRef}>
-        {filteredDoors.length === 0 ? (
-          <div className="empty-state">
-            <p>No doors match your filters</p>
-            {hasActiveFilters && (
-              <button className="text-button" onClick={clearFilters}>
-                Clear filters
-              </button>
-            )}
-          </div>
-        ) : (
-          <>
-            <div className="door-list-header">
-              <button className="list-header-button" onClick={() => toggleSort('door')}>
-                <span className="label-text">Door</span>
-                <span className="sort-indicator">{sortIndicator('door')}</span>
-              </button>
-              <button className="list-header-button" onClick={() => toggleSort('type')}>
-                <span className="label-text">Type</span>
-                <span className="sort-indicator">{sortIndicator('type')}</span>
-              </button>
-              <button className="list-header-button" onClick={() => toggleSort('storey')}>
-                <span className="label-text">Storey</span>
-                <span className="sort-indicator">{sortIndicator('storey')}</span>
-              </button>
-              <span>Views</span>
-            </div>
-
-            {sortedDoors.slice(0, 100).map((door) => (
-              <div
-                key={door.doorId}
-                className={`door-row ${hoveredDoorId === door.doorId ? 'hovered' : ''}`}
-                onMouseEnter={() => handleDoorHover(door.doorId)}
-                onMouseLeave={() => handleDoorHover(null)}
-              >
-                <button className="door-name" onClick={() => handleDoorClick(door)} title={getDoorLabel(door)}>
-                  {getDoorLabel(door)}
-                </button>
-
-                <div className="door-cell muted" title={door.doorTypeName || ''}>
-                  {door.doorTypeName || '—'}
-                </div>
-
-                <div className="door-cell muted" title={door.storeyName || ''}>
-                  {door.storeyName || '—'}
-                </div>
-
-                <div className="door-actions">
-                  <button
-                    className="action-button compact"
-                    onClick={() => handleDoorClick(door)}
-                    title="Zoom to door"
-                  >
-                    +
-                  </button>
-                  <button
-                    className="action-button compact"
-                    onClick={() => showSingleDoor(door, 'front')}
-                    title="Front view"
-                  >
-                    F
-                  </button>
-                  <button
-                    className="action-button compact"
-                    onClick={() => showSingleDoor(door, 'back')}
-                    title="Back view"
-                  >
-                    B
-                  </button>
-                  <button
-                    className="action-button compact"
-                    onClick={() => showSingleDoor(door, 'plan')}
-                    title="Plan view"
-                  >
-                    P
-                  </button>
-                </div>
-              </div>
-            ))}
-          </>
-        )}
-        {sortedDoors.length > 100 && (
-          <div className="more-items">
-            +{sortedDoors.length - 100} more doors
-          </div>
-        )}
       </div>
 
       {/* Export Section */}
@@ -1141,131 +762,6 @@ export default function DoorPanel({
           color: #1a1a1a;
         }
 
-        .filter-badge {
-          position: absolute;
-          top: -2px;
-          right: -2px;
-          width: 8px;
-          height: 8px;
-          background: #f59e0b;
-          border-radius: 50%;
-        }
-
-        .filter-section {
-          padding: 12px 16px;
-          border-bottom: 1px solid #444;
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .search-container {
-          position: relative;
-        }
-
-        .search-icon {
-          position: absolute;
-          left: 10px;
-          top: 50%;
-          transform: translateY(-50%);
-          color: #666;
-        }
-
-        .search-input {
-          width: 100%;
-          padding: 8px 32px;
-          background: #1a1a1a;
-          border: 1px solid #444;
-          border-radius: 6px;
-          color: #fff;
-          font-size: 13px;
-        }
-
-        .search-input:focus {
-          outline: none;
-          border-color: #4ecdc4;
-        }
-
-        .clear-search {
-          position: absolute;
-          right: 8px;
-          top: 50%;
-          transform: translateY(-50%);
-          background: none;
-          border: none;
-          color: #666;
-          cursor: pointer;
-          font-size: 16px;
-        }
-
-        .filter-group {
-          display: flex;
-          flex-direction: column;
-          gap: 6px;
-        }
-
-        .filter-label {
-          font-size: 11px;
-          text-transform: uppercase;
-          color: #888;
-          letter-spacing: 0.5px;
-        }
-
-        .filter-label.collapsible {
-          display: flex;
-          align-items: center;
-          transition: color 0.2s ease;
-        }
-
-        .filter-label.collapsible:hover {
-          color: #aaa;
-        }
-
-        .filter-chips {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 6px;
-        }
-
-        .filter-chip {
-          display: flex;
-          align-items: center;
-          gap: 4px;
-          padding: 4px 10px;
-          background: #1a1a1a;
-          border: 1px solid #444;
-          border-radius: 16px;
-          color: #ccc;
-          font-size: 12px;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-
-        .filter-chip:hover {
-          border-color: #666;
-        }
-
-        .filter-chip.active {
-          background: #4ecdc4;
-          border-color: #4ecdc4;
-          color: #1a1a1a;
-        }
-
-        .chip-count {
-          font-size: 10px;
-          opacity: 0.7;
-        }
-
-        .clear-filters {
-          background: none;
-          border: none;
-          color: #4ecdc4;
-          font-size: 12px;
-          cursor: pointer;
-          align-self: flex-start;
-          padding: 0;
-        }
-
         .selection-controls {
           display: flex;
           flex-direction: column;
@@ -1284,183 +780,6 @@ export default function DoorPanel({
           font-size: 11px;
           line-height: 1.35;
           color: #6b7280;
-        }
-
-        .text-button {
-          background: #262626;
-          border: 1px solid #3c3c3c;
-          color: #d1d5db;
-          font-size: 11px;
-          border-radius: 999px;
-          cursor: pointer;
-          padding: 4px 10px;
-        }
-
-        .text-button:hover {
-          background: #333;
-          color: #fff;
-        }
-
-        .door-list {
-          flex: 1;
-          overflow-y: auto;
-          padding: 0;
-        }
-
-        .empty-state {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          padding: 32px;
-          color: #666;
-          gap: 12px;
-        }
-
-        .door-list-header {
-          display: grid;
-          grid-template-columns: minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
-          gap: 8px;
-          padding: 8px 12px;
-          background: #1d1d1d;
-          border-bottom: 1px solid #303030;
-          font-size: 10px;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          color: #7d7d7d;
-          position: sticky;
-          top: 0;
-          z-index: 5;
-        }
-
-        .door-list-header > span:last-child {
-          text-align: center;
-        }
-
-        .list-header-button {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          width: 100%;
-          min-width: 0;
-          background: none;
-          border: none;
-          color: inherit;
-          cursor: pointer;
-          padding: 0;
-          text-transform: uppercase;
-          letter-spacing: 0.06em;
-          font-size: inherit;
-          font-weight: 600;
-          text-align: left;
-          overflow: hidden;
-        }
-
-        .list-header-button:hover {
-          color: #cbd5e1;
-        }
-
-        .list-header-button .label-text {
-          min-width: 0;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .sort-indicator {
-          font-size: 10px;
-          line-height: 1;
-          color: #94a3b8;
-          flex-shrink: 0;
-          margin-left: 4px;
-        }
-
-        .door-row {
-          display: grid;
-          grid-template-columns: minmax(0, 1fr) minmax(0, 88px) minmax(0, 68px) 48px;
-          gap: 8px;
-          align-items: center;
-          min-height: 36px;
-          padding: 5px 12px;
-          border-bottom: 1px solid #2c2c2c;
-          transition: background 0.15s ease;
-        }
-
-        .door-row:hover, .door-row.hovered {
-          background: #242424;
-        }
-
-        .door-name {
-          border: none;
-          background: none;
-          color: #f3f4f6;
-          text-align: left;
-          font-size: 12px;
-          font-weight: 500;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-          cursor: pointer;
-          padding: 0;
-        }
-
-        .door-name:hover {
-          color: #93c5fd;
-        }
-
-        .door-cell {
-          font-size: 11px;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-
-        .door-cell.muted {
-          color: #9ca3af;
-        }
-
-        .door-actions {
-          display: grid;
-          grid-template-columns: repeat(2, 20px);
-          grid-template-rows: repeat(2, 20px);
-          place-content: center;
-          justify-content: center;
-          gap: 4px;
-        }
-
-        .action-button {
-          width: 20px;
-          height: 20px;
-          border: 1px solid #4b5563;
-          background: #2d2d2d;
-          border-radius: 5px;
-          color: #d1d5db;
-          font-size: 9px;
-          font-weight: 700;
-          line-height: 1;
-          display: inline-flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          transition: all 0.15s ease;
-          padding: 0;
-        }
-
-        .action-button:hover {
-          background: #374151;
-          border-color: #6b7280;
-          color: #fff;
-        }
-
-        .action-button.compact {
-          min-width: 20px;
-        }
-
-        .more-items {
-          text-align: center;
-          padding: 12px;
-          color: #666;
-          font-size: 12px;
         }
 
         .export-section {
