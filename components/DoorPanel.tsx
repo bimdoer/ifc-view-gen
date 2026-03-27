@@ -646,8 +646,8 @@ export default function DoorPanel({
         }
 
         .door-count-badge {
-          background: #4ecdc4;
-          color: #1a1a1a;
+          background: #2563eb;
+          color: #fff;
           padding: 2px 8px;
           border-radius: 12px;
           font-size: 12px;
