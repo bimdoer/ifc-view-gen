@@ -124,7 +124,11 @@ async function buildContextVariant(options: {
     context.detailedGeometry = {
         doorMeshes: [doorMesh],
         wallMeshes,
+        nearbyWallMeshes: [],
         slabMeshes: [],
+        ceilingMeshes: [],
+        nearbyDoorMeshes: [],
+        stairMeshes: [],
         deviceMeshes: [],
     }
     return context
@@ -246,8 +250,8 @@ async function main() {
     const scalePxPerMeter = (perpendicularPlanDoorBox.maxY - perpendicularPlanDoorBox.minY) / 0.08
     const perpendicularWallThicknessPx = perpendicularPlanWallBox.maxY - perpendicularPlanWallBox.minY
     assert.ok(
-        perpendicularWallThicknessPx <= scalePxPerMeter * 1.05,
-        `Expected perpendicular wall return to be cropped near 1m, got ${perpendicularWallThicknessPx.toFixed(2)}px at ${scalePxPerMeter.toFixed(2)} px/m`
+        perpendicularWallThicknessPx >= scalePxPerMeter * 1.05,
+        `Expected perpendicular wall return to remain visibly present beyond the old 1m crop, got ${perpendicularWallThicknessPx.toFixed(2)}px at ${scalePxPerMeter.toFixed(2)} px/m`
     )
 
     console.info('Standalone host geometry test passed.', {

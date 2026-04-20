@@ -48,7 +48,11 @@ export interface DoorContextDiagnostics {
     viewFrameSource: DoorContextViewFrameSource
     detailedDoorMeshCount?: number
     detailedWallMeshCount?: number
+    detailedNearbyWallMeshCount?: number
     detailedSlabMeshCount?: number
+    detailedCeilingMeshCount?: number
+    detailedNearbyDoorMeshCount?: number
+    detailedStairMeshCount?: number
     detailedDeviceMeshCount?: number
     detailedViewFrame?: DoorViewFrame
 }
@@ -61,7 +65,16 @@ export interface DoorContext {
     hostSlabAbove: ElementInfo | null
     hostSlabsBelow: ElementInfo[]
     hostSlabsAbove: ElementInfo[]
+    hostCeilings: ElementInfo[]
     nearbyDoors: ElementInfo[]
+    /**
+     * Walls located within the plan viewport band around the door, excluding the
+     * host wall itself. Populated so that plan-view rendering can section real
+     * perpendicular / adjacent walls (L-corners, T-intersections, wall returns)
+     * at the door's cut plane instead of drawing two synthetic jamb rectangles.
+     */
+    nearbyWalls: ElementInfo[]
+    nearbyStairs: ElementInfo[]
     nearbyDevices: ElementInfo[]
     nearbyDeviceVisibility: NearbyDeviceVisibility[]
     geometricNormal: THREE.Vector3
@@ -98,7 +111,12 @@ export interface DoorContext {
     detailedGeometry?: {
         doorMeshes: THREE.Mesh[]
         wallMeshes: THREE.Mesh[]
+        /** Meshes for walls adjacent to the door — perpendicular / neighbouring walls used for plan-section rendering. Never includes host-wall meshes. */
+        nearbyWallMeshes: THREE.Mesh[]
         slabMeshes: THREE.Mesh[]
+        ceilingMeshes: THREE.Mesh[]
+        nearbyDoorMeshes: THREE.Mesh[]
+        stairMeshes: THREE.Mesh[]
         deviceMeshes: THREE.Mesh[]
     }
 }
@@ -314,6 +332,17 @@ export function getDoorOperationInfo(operationType: string | null): DoorOperatio
     if (upper.includes('SINGLE_SWING_RIGHT') || upper === 'SINGLE_SWING_RIGHT') {
         return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
     }
+    // IfcDoorTypeOperationEnum: DOUBLE_SWING_LEFT / DOUBLE_SWING_RIGHT is a single-leaf
+    // double-acting door (swings both ways) with a specific handedness. Must be matched
+    // before the generic DOUBLE_SWING / DOUBLE_DOOR_* fallback below, otherwise the
+    // `_LEFT`/`_RIGHT` variants fall through to the final `SWING` fallback and get
+    // parsed as right-hinged by default — breaking handedness mirroring.
+    if (upper.includes('DOUBLE_SWING_LEFT')) {
+        return { kind: 'swing', hingeSide: 'left', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
+    }
+    if (upper.includes('DOUBLE_SWING_RIGHT')) {
+        return { kind: 'swing', hingeSide: 'right', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
+    }
     if (upper.includes('DOUBLE_DOOR_SINGLE_SWING') || upper.includes('DOUBLE_DOOR_DOUBLE_SWING') || upper === 'DOUBLE_SWING') {
         return { kind: 'swing', hingeSide: 'both', fixedSide: null, swingCapable: true, fixedLabeled: false, slideDirection: null }
     }
@@ -324,7 +353,10 @@ export function getDoorOperationInfo(operationType: string | null): DoorOperatio
         return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: 'right' }
     }
     if (upper.includes('SLIDING') && !upper.includes('FOLDING')) {
-        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: 'right' }
+        // Generic `SLIDING` is IFC's unspecified-direction value. Leave slideDirection
+        // null so the renderer can render a neutral/centered slide indicator rather
+        // than forcing an arbitrary handedness (matching the `folding` branch behavior).
+        return { kind: 'sliding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: null }
     }
     if (upper.includes('FOLDING')) {
         return { kind: 'folding', hingeSide: null, fixedSide: null, swingCapable: false, fixedLabeled: false, slideDirection: null }
@@ -490,7 +522,12 @@ function resolveOperableLeaves(
         return buildSingleLeaf('cset-clear-width', clearWidth, operation.fixedSide ? asymmetricPanelPosition : null, clearWidth)
     }
 
-    return buildSingleLeaf('cset-clear-width', safeTotalWidth, operation.fixedSide ? asymmetricPanelPosition : null, safeTotalWidth)
+    return buildSingleLeaf(
+        'cset-clear-width',
+        operableSpanWidth,
+        operation.fixedSide ? asymmetricPanelPosition : null,
+        operableSpanWidth
+    )
 }
 
 async function getDoorCsetStandardCH(
@@ -704,6 +741,41 @@ function isSlabType(typeName: string, ifcType?: number): boolean {
     )
 }
 
+function isCoveringType(typeName: string, ifcType?: number): boolean {
+    const lower = typeName.toLowerCase()
+    const ifcCovering = (WebIFC as any).IFCCOVERING
+    return (
+        lower.includes('covering')
+        || lower.includes('ceiling')
+        || lower.includes('decke')
+        || typeName === 'IFCCOVERING'
+        || typeName.startsWith('IFCCOVERING')
+        || (ifcType !== undefined && (
+            (typeof ifcCovering === 'number' && ifcType === ifcCovering)
+            || ifcType === 326
+        ))
+    )
+}
+
+function isStairType(typeName: string, ifcType?: number): boolean {
+    const lower = typeName.toLowerCase()
+    const ifcStair = (WebIFC as any).IFCSTAIR
+    const ifcStairFlight = (WebIFC as any).IFCSTAIRFLIGHT
+    return (
+        lower.includes('stair')
+        || lower.includes('treppe')
+        || typeName === 'IFCSTAIR'
+        || typeName === 'IFCSTAIRFLIGHT'
+        || typeName.startsWith('IFCSTAIR')
+        || (ifcType !== undefined && (
+            (typeof ifcStair === 'number' && ifcType === ifcStair)
+            || (typeof ifcStairFlight === 'number' && ifcType === ifcStairFlight)
+            || ifcType === 331
+            || ifcType === 332
+        ))
+    )
+}
+
 /**
  * Checks if an element type represents an electrical device
  */
@@ -716,22 +788,27 @@ function isElectricalDeviceType(typeName: string): boolean {
         lower.includes('conduit') ||
         lower.includes('carrier') ||
         lower.includes('junction') ||
-        lower.includes('distributionflow') ||
         lower.includes('switch') ||
         lower.includes('outlet') ||
         lower.includes('socket') ||
         lower.includes('light') ||
         lower.includes('fixture') ||
         lower.includes('panel') ||
-        lower.includes('distribution') ||
+        // Match only specific electrical distribution concretes (e.g. distribution board),
+        // not the abstract `IfcDistributionFlowElement` / `IfcDistributionControlElement`
+        // bases which also cover HVAC / plumbing.
+        lower.includes('distributionboard') ||
+        // IFCFLOWTERMINAL covers sinks/diffusers as well as outlets/switches; it is kept
+        // because in typical door-context IFC exports flow terminals near doors are almost
+        // always electrical (wall outlets / light fixtures). The abstract base classes
+        // (IfcFlowSegment, IfcFlowController, IfcDistributionFlowElement,
+        // IfcDistributionControlElement) are intentionally excluded: they also cover
+        // HVAC/plumbing elements which must not enter the nearby-device set or they would
+        // crowd out real switches/outlets given the selection cap.
         typeName === 'IFCFLOWTERMINAL' ||
         typeName === 'IFCSWITCHINGDEVICE' ||
         typeName === 'IFCOUTLET' ||
         typeName === 'IFCLIGHTFIXTURE' ||
-        typeName === 'IFCFLOWSEGMENT' ||
-        typeName === 'IFCFLOWCONTROLLER' ||
-        typeName === 'IFCDISTRIBUTIONCONTROLELEMENT' ||
-        typeName === 'IFCDISTRIBUTIONFLOWELEMENT' ||
         typeName === 'IFCELECTRICDISTRIBUTIONBOARD' ||
         typeName === 'IFCJUNCTIONBOX' ||
         typeName === 'IFCCABLECARRIERSEGMENT' ||
@@ -1060,13 +1137,22 @@ function classifyNearbyDeviceVisibility(
 
     const wallMid = (wallInterval.min + wallInterval.max) / 2
     const signedDepth = deviceMid - wallMid
+    const insideWallEnvelope = deviceInterval.max >= wallInterval.min && deviceInterval.min <= wallInterval.max
     const overlapScore = Math.max(frontOverlapScore, backOverlapScore)
     const overlapDelta = Math.abs(frontOverlapScore - backOverlapScore)
     const overlapDecisionThreshold = Math.max(0.015, faceBandDepth * 0.12)
     const depthDecisionThreshold = Math.max(0.02, wallDepth * 0.08)
+    const frontFaceGap = Math.abs(deviceInterval.max - wallInterval.max)
+    const backFaceGap = Math.abs(deviceInterval.min - wallInterval.min)
 
     let side: DeviceVisibilitySide = 'unknown'
-    if (overlapScore > 0 && overlapDelta > overlapDecisionThreshold) {
+    if (insideWallEnvelope) {
+        if (overlapScore > 0 && overlapDelta > overlapDecisionThreshold * 0.5) {
+            side = frontOverlapScore >= backOverlapScore ? 'front' : 'back'
+        } else if (Math.abs(frontFaceGap - backFaceGap) > 0.01) {
+            side = frontFaceGap < backFaceGap ? 'front' : 'back'
+        }
+    } else if (overlapScore > 0 && overlapDelta > overlapDecisionThreshold) {
         side = frontOverlapScore > backOverlapScore ? 'front' : 'back'
     } else if (signedDepth > depthDecisionThreshold) {
         side = 'front'
@@ -1303,7 +1389,7 @@ function findHostWall(
     return closestWall
 }
 
-const HOST_CONTEXT_PERPENDICULAR_CROP_METERS = 1.0
+const HOST_CONTEXT_PERPENDICULAR_CROP_METERS = 2.5
 
 function findHostSlabs(
     door: ElementInfo,
@@ -1392,12 +1478,215 @@ function findHostSlabs(
     belowCandidates.sort(sortCandidates)
     aboveCandidates.sort(sortCandidates)
 
-    return {
-        below: belowCandidates[0]?.element ?? null,
-        above: aboveCandidates[0]?.element ?? null,
-        belowAll: belowCandidates.map((candidate) => candidate.element),
-        aboveAll: aboveCandidates.map((candidate) => candidate.element),
+    // Restrict to the door's own storey. Keep only slabs adjacent to the door
+    // and any composite partners that are stacked directly on top of the
+    // primary slab (concrete + finish / topping). Anything further than
+    // MAX_STOREY_OFFSET or separated by a free-standing gap belongs to a
+    // different storey and must not appear in the elevation.
+    const MAX_STOREY_OFFSET_METERS = 1.5
+    const COMPOSITE_STACK_TOLERANCE_METERS = 0.1
+
+    const keepCompositeStack = (
+        candidates: Candidate[],
+        direction: 'below' | 'above'
+    ): ElementInfo[] => {
+        if (candidates.length === 0) return []
+        const primary = candidates[0]
+        if (primary.gap > MAX_STOREY_OFFSET_METERS) return []
+
+        const primaryBox = primary.element.boundingBox
+        if (!primaryBox) return [primary.element]
+        const primaryRange = measureBoxAlongAxis(primaryBox, upAxis)
+
+        const keep: ElementInfo[] = [primary.element]
+        const layers = [{ minB: primaryRange.min, maxB: primaryRange.max }]
+
+        for (let i = 1; i < candidates.length; i++) {
+            const candidate = candidates[i]
+            if (candidate.gap > MAX_STOREY_OFFSET_METERS) continue
+            const box = candidate.element.boundingBox
+            if (!box) continue
+            const range = measureBoxAlongAxis(box, upAxis)
+            // Composite stack: candidate must touch at least one existing layer
+            // within COMPOSITE_STACK_TOLERANCE_METERS along the vertical axis.
+            const touchesExisting = layers.some((layer) => {
+                const overlap = Math.min(layer.maxB, range.max) - Math.max(layer.minB, range.min)
+                if (overlap > -COMPOSITE_STACK_TOLERANCE_METERS) return true
+                // Asymmetric adjacency: a "below"-direction candidate must stack UNDER an
+                // existing layer (its top touches the layer's bottom). An "above"-direction
+                // candidate must stack OVER an existing layer (its bottom touches the layer's
+                // top). The previous symmetric check accepted geometrically implausible
+                // arrangements (e.g. an "above" layer whose top sat flush with the primary's
+                // bottom), which could pull floors from the wrong storey into elevation host
+                // context.
+                if (direction === 'below') {
+                    return Math.abs(range.max - layer.minB) <= COMPOSITE_STACK_TOLERANCE_METERS
+                }
+                return Math.abs(range.min - layer.maxB) <= COMPOSITE_STACK_TOLERANCE_METERS
+            })
+            if (touchesExisting) {
+                keep.push(candidate.element)
+                layers.push({ minB: range.min, maxB: range.max })
+            }
+        }
+
+        return keep
     }
+
+    const belowKept = keepCompositeStack(belowCandidates, 'below')
+    const aboveKept = keepCompositeStack(aboveCandidates, 'above')
+
+    return {
+        below: belowKept[0] ?? null,
+        above: aboveKept[0] ?? null,
+        belowAll: belowKept,
+        aboveAll: aboveKept,
+    }
+}
+
+function findHostCeilings(
+    door: ElementInfo,
+    hostWall: ElementInfo | null,
+    coverings: ElementInfo[],
+    viewFrame: DoorViewFrame
+): ElementInfo[] {
+    const doorBox = door.boundingBox
+    if (!doorBox || coverings.length === 0) {
+        return []
+    }
+
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const depthAxis = viewFrame.semanticFacing.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const doorWidth = measureBoxAlongAxis(doorBox, widthAxis)
+    const doorHeight = measureBoxAlongAxis(doorBox, upAxis)
+    const originDepth = viewFrame.origin.dot(depthAxis)
+    const hostDepth = hostWall?.boundingBox
+        ? measureBoxAlongAxis(hostWall.boundingBox, depthAxis)
+        : {
+            min: originDepth - Math.max(viewFrame.thickness / 2, 0.12),
+            max: originDepth + Math.max(viewFrame.thickness / 2, 0.12),
+        }
+    const widthPadding = Math.max(viewFrame.width * 0.18, 0.12)
+    const depthPadding = Math.max(viewFrame.thickness * 0.3, 0.18)
+
+    return coverings
+        .filter((covering) => Boolean(covering.boundingBox))
+        .map((covering) => {
+            const box = covering.boundingBox!
+            const widthRange = measureBoxAlongAxis(box, widthAxis)
+            const depthRange = measureBoxAlongAxis(box, depthAxis)
+            const upRange = measureBoxAlongAxis(box, upAxis)
+            const localDepthMin = depthRange.min - originDepth
+            const localDepthMax = depthRange.max - originDepth
+            if (
+                localDepthMin > HOST_CONTEXT_PERPENDICULAR_CROP_METERS
+                || localDepthMax < -HOST_CONTEXT_PERPENDICULAR_CROP_METERS
+            ) {
+                return null
+            }
+
+            const widthOverlap = getIntervalOverlapLength(
+                widthRange.min,
+                widthRange.max,
+                doorWidth.min - widthPadding,
+                doorWidth.max + widthPadding
+            )
+            if (widthOverlap <= 0.04) return null
+
+            const depthOverlap = getIntervalOverlapLength(
+                depthRange.min,
+                depthRange.max,
+                hostDepth.min - depthPadding,
+                hostDepth.max + depthPadding
+            )
+            if (depthOverlap <= 0.01) return null
+
+            const gapAboveDoor = upRange.min - doorHeight.max
+            if (gapAboveDoor < -0.2 || gapAboveDoor > 1.8) return null
+
+            return {
+                element: covering,
+                score: gapAboveDoor - (widthOverlap + depthOverlap) * 0.2,
+                upRange,
+            }
+        })
+        .filter(
+            (entry): entry is { element: ElementInfo; score: number; upRange: { min: number; max: number } } =>
+                entry !== null
+        )
+        .sort((a, b) => a.score - b.score || a.element.expressID - b.element.expressID)
+        // Suspended ceiling context: keep only the primary ceiling plane and
+        // any coverings that occupy the same horizontal band. Anything at a
+        // different elevation is a ceiling from an adjacent/other storey and
+        // must not be projected into the door's elevation view.
+        .filter((entry, index, array) => {
+            if (index === 0) return true
+            const primary = array[0]
+            const SAME_BAND_TOLERANCE_METERS = 0.25
+            return Math.abs(entry.upRange.min - primary.upRange.min) <= SAME_BAND_TOLERANCE_METERS
+                || Math.abs(entry.upRange.max - primary.upRange.max) <= SAME_BAND_TOLERANCE_METERS
+        })
+        .map((entry) => entry.element)
+}
+
+function findNearbyStairs(
+    door: ElementInfo,
+    stairs: ElementInfo[],
+    viewFrame: DoorViewFrame,
+    lateralRadius: number = 1.8,
+    depthRadius: number = 2.2,
+    limit: number = 4
+): ElementInfo[] {
+    const doorBox = door.boundingBox
+    if (!doorBox || stairs.length === 0) {
+        return []
+    }
+
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const depthAxis = viewFrame.semanticFacing.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const doorWidth = measureBoxAlongAxis(doorBox, widthAxis)
+    const doorHeight = measureBoxAlongAxis(doorBox, upAxis)
+    const originDepth = viewFrame.origin.dot(depthAxis)
+    const depthBandMin = originDepth - depthRadius
+    const depthBandMax = originDepth + depthRadius
+
+    return stairs
+        .filter((stair) => Boolean(stair.boundingBox))
+        .map((stair) => {
+            const box = stair.boundingBox!
+            const widthRange = measureBoxAlongAxis(box, widthAxis)
+            const depthRange = measureBoxAlongAxis(box, depthAxis)
+            const upRange = measureBoxAlongAxis(box, upAxis)
+            const widthGap = Math.max(
+                doorWidth.min - lateralRadius - widthRange.max,
+                widthRange.min - (doorWidth.max + lateralRadius),
+                0
+            )
+            const verticalGap = Math.max(
+                doorHeight.min - 0.5 - upRange.max,
+                upRange.min - (doorHeight.max + 0.8),
+                0
+            )
+            if (widthGap > 0.01 || verticalGap > 0.01) {
+                return null
+            }
+            if (!rangesOverlap(depthRange.min, depthRange.max, depthBandMin, depthBandMax)) {
+                return null
+            }
+
+            return {
+                element: stair,
+                score:
+                    Math.abs(((widthRange.min + widthRange.max) / 2) - ((doorWidth.min + doorWidth.max) / 2))
+                    + Math.abs(((depthRange.min + depthRange.max) / 2) - originDepth) * 0.8,
+            }
+        })
+        .filter((entry): entry is { element: ElementInfo; score: number } => entry !== null)
+        .sort((a, b) => a.score - b.score || a.element.expressID - b.element.expressID)
+        .slice(0, limit)
+        .map((entry) => entry.element)
 }
 
 /**
@@ -1420,8 +1709,8 @@ function findNearbyDevices(
     const upAxis = viewFrame.upAxis.clone().normalize()
     const doorBoundsInFrame = measureBoxInFrame(door.boundingBox, widthAxis, upAxis)
     const doorCenterA = (doorBoundsInFrame.minA + doorBoundsInFrame.maxA) / 2
-    const expandedDoorVerticalMin = doorBoundsInFrame.minB - 0.15
-    const expandedDoorVerticalMax = doorBoundsInFrame.maxB + 0.15
+    const expandedDoorVerticalMin = doorBoundsInFrame.minB
+    const expandedDoorVerticalMax = doorBoundsInFrame.maxB
     const edgeBandThreshold = Math.max(viewFrame.width * 0.18, 0.24)
 
     const filtered = devices
@@ -1574,6 +1863,111 @@ function findNearbyDoors(
         )
         .slice(0, limit)
         .map((entry) => entry.door)
+}
+
+/**
+ * Find walls in the model that sit within the plan viewport around a door and
+ * should participate in the plan-section rendering. This is how perpendicular
+ * walls at an L-corner, wall returns, or partitions meeting the host wall at
+ * a T-intersection become visible in plan view.
+ *
+ * Selection criteria (in the door's local `viewFrame`):
+ *   - widthAxis:       within ±(viewFrame.width/2 + lateralRadius)
+ *   - upAxis:          overlaps the door's height band (±0.1 m)
+ *   - semanticFacing:  within ±depthRadius of the door plane
+ *
+ * The host wall is excluded because it is already available via
+ * `context.hostWall`. A single bounding-box overlap test is sufficient here —
+ * the renderer later does precise mesh-level sectioning at the cut plane.
+ */
+function findNearbyWalls(
+    door: ElementInfo,
+    walls: ElementInfo[],
+    hostWall: ElementInfo | null,
+    viewFrame: DoorViewFrame,
+    lateralRadius: number = 1.6,
+    depthRadius: number = 1.2,
+    limit: number = 12
+): ElementInfo[] {
+    if (!door.boundingBox) return []
+
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const depthAxis = viewFrame.semanticFacing.clone().normalize()
+
+    const originWidth = viewFrame.origin.dot(widthAxis)
+    const originUp = viewFrame.origin.dot(upAxis)
+    const originDepth = viewFrame.origin.dot(depthAxis)
+
+    const halfWidth = viewFrame.width / 2
+    const halfHeight = viewFrame.height / 2
+    const widthBandMin = originWidth - halfWidth - lateralRadius
+    const widthBandMax = originWidth + halfWidth + lateralRadius
+    const upBandMin = originUp - halfHeight - 0.1
+    const upBandMax = originUp + halfHeight + 0.1
+    const depthBandMin = originDepth - depthRadius
+    const depthBandMax = originDepth + depthRadius
+
+    const hostWallID = hostWall?.expressID
+
+    const candidates = walls
+        .filter((wall) =>
+            wall.expressID !== hostWallID
+            && Boolean(wall.boundingBox)
+        )
+        .map((wall) => {
+            const widthRange = measureBoxAlongAxis(wall.boundingBox!, widthAxis)
+            const upRange = measureBoxAlongAxis(wall.boundingBox!, upAxis)
+            const depthRange = measureBoxAlongAxis(wall.boundingBox!, depthAxis)
+
+            if (!rangesOverlap(widthRange.min, widthRange.max, widthBandMin, widthBandMax)) {
+                return null
+            }
+            if (!rangesOverlap(upRange.min, upRange.max, upBandMin, upBandMax)) {
+                return null
+            }
+            if (!rangesOverlap(depthRange.min, depthRange.max, depthBandMin, depthBandMax)) {
+                return null
+            }
+
+            const widthOverlap = getIntervalOverlapLength(
+                widthRange.min, widthRange.max,
+                widthBandMin, widthBandMax
+            )
+            const depthOverlap = getIntervalOverlapLength(
+                depthRange.min, depthRange.max,
+                depthBandMin, depthBandMax
+            )
+            const widthCenter = (widthRange.min + widthRange.max) / 2
+            const depthCenter = (depthRange.min + depthRange.max) / 2
+            const lateralDistance = Math.abs(widthCenter - originWidth)
+            const depthDistance = Math.abs(depthCenter - originDepth)
+
+            const doorwayWidthGap = Math.max(
+                widthBandMin - widthRange.max,
+                widthRange.min - widthBandMax,
+                0
+            )
+            const doorPlaneGap = Math.max(
+                depthBandMin - depthRange.max,
+                depthRange.min - depthBandMax,
+                0
+            )
+
+            return {
+                wall,
+                score:
+                    lateralDistance
+                    + depthDistance
+                    + doorwayWidthGap * 2.5
+                    + doorPlaneGap * 3
+                    - (widthOverlap + depthOverlap) * 0.6,
+            }
+        })
+        .filter((entry): entry is { wall: ElementInfo; score: number } => entry !== null)
+        .sort((a, b) => a.score - b.score || a.wall.expressID - b.wall.expressID)
+
+    return candidates.slice(0, limit).map((entry) => entry.wall)
 }
 
 /**
@@ -1775,6 +2169,8 @@ export async function analyzeDoors(
     const doors: ElementInfo[] = []
     const walls: ElementInfo[] = []
     const slabs: ElementInfo[] = []
+    const coverings: ElementInfo[] = []
+    const stairs: ElementInfo[] = []
     const devices: ElementInfo[] = []
 
     // Helper to process elements from a model
@@ -1790,6 +2186,10 @@ export async function analyzeDoors(
                 || slabAggregatePartMap?.has(element.expressID)
             ) {
                 slabs.push(element)
+            } else if (isCoveringType(element.typeName, element.ifcType)) {
+                coverings.push(element)
+            } else if (isStairType(element.typeName, element.ifcType)) {
+                stairs.push(element)
             } else if (isElectricalDeviceType(element.typeName)) {
                 devices.push(element)
             }
@@ -1861,10 +2261,13 @@ export async function analyzeDoors(
             belowAll: hostSlabsBelow,
             aboveAll: hostSlabsAbove,
         } = findHostSlabs(door, hostWall, slabs, viewFrame)
+        const hostCeilings = findHostCeilings(door, hostWall, coverings, viewFrame)
+        const nearbyStairs = findNearbyStairs(door, stairs, viewFrame)
         const nearbyDevices = findNearbyDevices(door, devices, geometricNormal, hostWall, viewFrame)
         const nearbyDeviceVisibility = nearbyDevices.map((device) =>
             classifyNearbyDeviceVisibility(device, hostWall, viewFrame)
         )
+        const nearbyWalls = findNearbyWalls(door, walls, hostWall, viewFrame)
 
         const center = door.boundingBox
             ? door.boundingBox.getCenter(new THREE.Vector3())
@@ -1898,7 +2301,10 @@ export async function analyzeDoors(
             hostSlabAbove,
             hostSlabsBelow,
             hostSlabsAbove,
+            hostCeilings,
             nearbyDoors: [],
+            nearbyWalls,
+            nearbyStairs,
             nearbyDevices,
             nearbyDeviceVisibility,
             geometricNormal,
@@ -1982,12 +2388,43 @@ export function getDoorMeshes(
 }
 
 export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
+    // Without a host wall there are no meshes to match. Guarding here also prevents
+    // meshes that happen to have a missing `userData.expressID` from comparing
+    // `undefined === undefined` and being wrongly classified as host-wall meshes.
+    if (!context.hostWall) {
+        return []
+    }
+    const hostWallExpressID = context.hostWall.expressID
     return getDoorMeshes(context, { includeHostWall: true }).filter(
         (mesh) => (
-            mesh.userData.expressID === context.hostWall?.expressID
-            || mesh.userData.elementInfo?.expressID === context.hostWall?.expressID
+            mesh.userData.expressID === hostWallExpressID
+            || mesh.userData.elementInfo?.expressID === hostWallExpressID
         )
     )
+}
+
+/**
+ * Meshes for walls adjacent to the door that should be sectioned in plan view
+ * (perpendicular walls at L-corners, wall returns, and partitions at
+ * T-intersections). Host-wall meshes are intentionally excluded.
+ */
+export function getNearbyWallMeshes(context: DoorContext): THREE.Mesh[] {
+    if (context.nearbyWalls.length === 0) {
+        return []
+    }
+
+    if (context.detailedGeometry?.nearbyWallMeshes?.length) {
+        return [...context.detailedGeometry.nearbyWallMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const wall of context.nearbyWalls) {
+        if (seenIDs.has(wall.expressID)) continue
+        seenIDs.add(wall.expressID)
+        meshes.push(...collectMeshesFromElement(wall))
+    }
+    return meshes
 }
 
 export function getHostSlabMeshes(context: DoorContext): THREE.Mesh[] {
@@ -2000,6 +2437,54 @@ export function getHostSlabMeshes(context: DoorContext): THREE.Mesh[] {
     return getDoorMeshes(context, { includeHostSlabs: true }).filter(
         (mesh) => slabIDs.has(mesh.userData.expressID)
     )
+}
+
+export function getHostCeilingMeshes(context: DoorContext): THREE.Mesh[] {
+    if (context.hostCeilings.length === 0) return []
+    if (context.detailedGeometry?.ceilingMeshes?.length) {
+        return [...context.detailedGeometry.ceilingMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const ceiling of context.hostCeilings) {
+        if (seenIDs.has(ceiling.expressID)) continue
+        seenIDs.add(ceiling.expressID)
+        meshes.push(...collectMeshesFromElement(ceiling))
+    }
+    return meshes
+}
+
+export function getNearbyDoorMeshes(context: DoorContext): THREE.Mesh[] {
+    if (context.nearbyDoors.length === 0) return []
+    if (context.detailedGeometry?.nearbyDoorMeshes?.length) {
+        return [...context.detailedGeometry.nearbyDoorMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const nearbyDoor of context.nearbyDoors) {
+        if (seenIDs.has(nearbyDoor.expressID)) continue
+        seenIDs.add(nearbyDoor.expressID)
+        meshes.push(...collectMeshesFromElement(nearbyDoor))
+    }
+    return meshes
+}
+
+export function getNearbyStairMeshes(context: DoorContext): THREE.Mesh[] {
+    if (context.nearbyStairs.length === 0) return []
+    if (context.detailedGeometry?.stairMeshes?.length) {
+        return [...context.detailedGeometry.stairMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const stair of context.nearbyStairs) {
+        if (seenIDs.has(stair.expressID)) continue
+        seenIDs.add(stair.expressID)
+        meshes.push(...collectMeshesFromElement(stair))
+    }
+    return meshes
 }
 
 /**
@@ -2063,6 +2548,9 @@ export async function loadDetailedGeometry(
     const doorIDs = new Set<number>()
     const wallIDs = new Set<number>()
     const slabIDs = new Set<number>()
+    const ceilingIDs = new Set<number>()
+    const nearbyDoorIDs = new Set<number>()
+    const stairIDs = new Set<number>()
     const deviceIDs = new Set<number>()
 
     for (const context of doorContexts) {
@@ -2070,8 +2558,20 @@ export async function loadDetailedGeometry(
         if (context.hostWall) {
             wallIDs.add(context.hostWall.expressID)
         }
+        for (const wall of context.nearbyWalls) {
+            wallIDs.add(wall.expressID)
+        }
         for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
             slabIDs.add(slab.expressID)
+        }
+        for (const ceiling of context.hostCeilings) {
+            ceilingIDs.add(ceiling.expressID)
+        }
+        for (const nearbyDoor of context.nearbyDoors) {
+            nearbyDoorIDs.add(nearbyDoor.expressID)
+        }
+        for (const stair of context.nearbyStairs) {
+            stairIDs.add(stair.expressID)
         }
         for (const device of context.nearbyDevices) {
             deviceIDs.add(device.expressID)
@@ -2090,7 +2590,7 @@ export async function loadDetailedGeometry(
     }
 
     // Extract all geometry in one pass
-    const allIDs = [...doorIDs, ...wallIDs, ...slabIDs, ...deviceIDs]
+    const allIDs = [...doorIDs, ...wallIDs, ...slabIDs, ...ceilingIDs, ...nearbyDoorIDs, ...stairIDs, ...deviceIDs]
     const geometryMap = await extractDetailedGeometry(file, allIDs)
     applyCenterOffset(geometryMap)
 
@@ -2113,12 +2613,43 @@ export async function loadDetailedGeometry(
         const wallMeshes = context.hostWall
             ? (geometryMap.get(context.hostWall.expressID) || [])
             : []
+        const nearbyWallMeshes: THREE.Mesh[] = []
+        const seenNearbyWallIDs = new Set<number>()
+        if (context.hostWall) {
+            seenNearbyWallIDs.add(context.hostWall.expressID)
+        }
+        for (const wall of context.nearbyWalls) {
+            if (seenNearbyWallIDs.has(wall.expressID)) continue
+            seenNearbyWallIDs.add(wall.expressID)
+            nearbyWallMeshes.push(...(geometryMap.get(wall.expressID) || []))
+        }
         const slabMeshes: THREE.Mesh[] = []
         const seenSlabIDs = new Set<number>()
         for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
             if (seenSlabIDs.has(slab.expressID)) continue
             seenSlabIDs.add(slab.expressID)
             slabMeshes.push(...(geometryMap.get(slab.expressID) || []))
+        }
+        const ceilingMeshes: THREE.Mesh[] = []
+        const seenCeilingIDs = new Set<number>()
+        for (const ceiling of context.hostCeilings) {
+            if (seenCeilingIDs.has(ceiling.expressID)) continue
+            seenCeilingIDs.add(ceiling.expressID)
+            ceilingMeshes.push(...(geometryMap.get(ceiling.expressID) || []))
+        }
+        const nearbyDoorMeshes: THREE.Mesh[] = []
+        const seenNearbyDoorIDs = new Set<number>()
+        for (const nearbyDoor of context.nearbyDoors) {
+            if (seenNearbyDoorIDs.has(nearbyDoor.expressID)) continue
+            seenNearbyDoorIDs.add(nearbyDoor.expressID)
+            nearbyDoorMeshes.push(...(geometryMap.get(nearbyDoor.expressID) || []))
+        }
+        const stairMeshes: THREE.Mesh[] = []
+        const seenStairIDs = new Set<number>()
+        for (const stair of context.nearbyStairs) {
+            if (seenStairIDs.has(stair.expressID)) continue
+            seenStairIDs.add(stair.expressID)
+            stairMeshes.push(...(geometryMap.get(stair.expressID) || []))
         }
         const deviceMeshes: THREE.Mesh[] = []
         for (const device of context.nearbyDevices) {
@@ -2129,7 +2660,11 @@ export async function loadDetailedGeometry(
         context.detailedGeometry = {
             doorMeshes,
             wallMeshes,
+            nearbyWallMeshes,
             slabMeshes,
+            ceilingMeshes,
+            nearbyDoorMeshes,
+            stairMeshes,
             deviceMeshes,
         }
 
@@ -2143,7 +2678,11 @@ export async function loadDetailedGeometry(
             ...baseDiagnostics,
             detailedDoorMeshCount: doorMeshes.length,
             detailedWallMeshCount: wallMeshes.length,
+            detailedNearbyWallMeshCount: nearbyWallMeshes.length,
             detailedSlabMeshCount: slabMeshes.length,
+            detailedCeilingMeshCount: ceilingMeshes.length,
+            detailedNearbyDoorMeshCount: nearbyDoorMeshes.length,
+            detailedStairMeshCount: stairMeshes.length,
             detailedDeviceMeshCount: deviceMeshes.length,
         }
         if (doorMeshes.length > 0) {

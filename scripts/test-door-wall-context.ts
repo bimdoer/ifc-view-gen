@@ -1,6 +1,6 @@
 import * as assert from 'node:assert/strict'
 import * as THREE from 'three'
-import { analyzeDoors, type DoorContext } from '../lib/door-analyzer'
+import { analyzeDoors, getDoorOperationInfo, type DoorContext } from '../lib/door-analyzer'
 import type { DoorCsetStandardCHData, DoorLeafMetadata } from '../lib/ifc-loader'
 import type { ElementInfo, LoadedIFCModel } from '../lib/ifc-types'
 import { planSvgCanvasHeight, renderDoorViews, type SVGRenderOptions } from '../lib/svg-renderer'
@@ -60,8 +60,11 @@ async function buildContext(options?: {
     openingDirection?: string
     placementYAxis?: THREE.Vector3
     deviceDepthOffset?: number
+    deviceCenterY?: number
     csetStandardCH?: Partial<DoorCsetStandardCHData>
     doorLeafMetadata?: DoorLeafMetadata
+    includeCeiling?: boolean
+    includeStair?: boolean
 }): Promise<DoorContext> {
     const {
         includeWall = true,
@@ -70,8 +73,11 @@ async function buildContext(options?: {
         openingDirection = 'SINGLE_SWING_LEFT',
         placementYAxis,
         deviceDepthOffset = 0.08,
+        deviceCenterY = 1.1,
         csetStandardCH,
         doorLeafMetadata,
+        includeCeiling = false,
+        includeStair = false,
     } = options ?? {}
 
     const doorCenter = new THREE.Vector3(0, 1.05, 0)
@@ -81,11 +87,13 @@ async function buildContext(options?: {
         new THREE.Vector3(localDeviceCenter.x, 0, localDeviceCenter.z),
         rotationY
     )
-    const deviceCenter = new THREE.Vector3(rotatedDeviceCenter.x, localDeviceCenter.y, rotatedDeviceCenter.z)
+    const deviceCenter = new THREE.Vector3(rotatedDeviceCenter.x, deviceCenterY, rotatedDeviceCenter.z)
 
     const doorMesh = createBoxMesh(1, 1, 2.1, 0.12, doorCenter, rotationY)
     const wallMesh = createBoxMesh(2, 40, 3, wallThickness, wallCenter, rotationY)
     const deviceMesh = createBoxMesh(3, 0.12, 0.12, 0.08, deviceCenter)
+    const ceilingMesh = createBoxMesh(4, 4, 0.14, 1.2, new THREE.Vector3(0, 2.45, 0), rotationY)
+    const stairMesh = createBoxMesh(5, 1.6, 0.4, 1.4, new THREE.Vector3(-0.95, 0.25, 0.55), rotationY)
 
     const door = makeElement(1, 'IFCDOOR', doorMesh)
     if (placementYAxis) {
@@ -101,6 +109,12 @@ async function buildContext(options?: {
 
     const device = makeElement(3, 'IFCELECTRICAPPLIANCE', deviceMesh)
     elements.push(device)
+    if (includeCeiling) {
+        elements.push(makeElement(4, 'IFCCOVERING', ceilingMesh))
+    }
+    if (includeStair) {
+        elements.push(makeElement(5, 'IFCSTAIR', stairMesh))
+    }
 
     const model: LoadedIFCModel = {
         group: new THREE.Group(),
@@ -151,7 +165,11 @@ async function buildContext(options?: {
     context.detailedGeometry = {
         doorMeshes: [doorMesh],
         wallMeshes: includeWall ? [wallMesh] : [],
+        nearbyWallMeshes: [],
         slabMeshes: [],
+        ceilingMeshes: includeCeiling ? [ceilingMesh] : [],
+        nearbyDoorMeshes: [],
+        stairMeshes: includeStair ? [stairMesh] : [],
         deviceMeshes: [deviceMesh],
     }
 
@@ -322,6 +340,119 @@ function getLongestDashedGuide(svg: string): { x1: number; y1: number; x2: numbe
     return bestLine
 }
 
+/**
+ * L-corner fixture: a door placed in a host wall with an adjacent
+ * perpendicular wall meeting the host wall near the door's left jamb. Used to
+ * verify that `findNearbyWalls` picks up the perpendicular wall and that the
+ * plan section renderer draws its footprint in plan view.
+ */
+async function buildLCornerContext(): Promise<DoorContext> {
+    const doorCenter = new THREE.Vector3(0, 1.05, 0)
+    const hostWallCenter = new THREE.Vector3(0, 1.5, 0)
+    // 0.24 thick × 3 tall × 3 deep; meets the host wall at x ≈ -0.6 (just
+    // outside the door's left jamb at x = -0.5) and extends towards -z.
+    const perpWallCenter = new THREE.Vector3(-0.6, 1.5, -1.5)
+
+    const doorMesh = createBoxMesh(1, 1, 2.1, 0.12, doorCenter)
+    const hostWallMesh = createBoxMesh(2, 40, 3, 0.24, hostWallCenter)
+    const perpWallMesh = createBoxMesh(3, 0.24, 3, 3, perpWallCenter)
+
+    const door = makeElement(1, 'IFCDOOR', doorMesh)
+    const hostWall = makeElement(2, 'IFCWALL', hostWallMesh)
+    const perpWall = makeElement(3, 'IFCWALL', perpWallMesh)
+
+    const model: LoadedIFCModel = {
+        group: new THREE.Group(),
+        elements: [door, hostWall, perpWall],
+        modelID: 0,
+        api: null,
+    }
+    ;(model as LoadedIFCModel & { fragmentsModel: { getItemsData: () => Promise<unknown[]> } }).fragmentsModel = {
+        getItemsData: async () => [],
+    }
+
+    const [context] = await analyzeDoors(
+        model,
+        undefined,
+        undefined,
+        new Map([[door.expressID, 'SINGLE_SWING_LEFT']])
+    )
+    assert.ok(context, 'Expected analyzeDoors to produce a door context for L-corner fixture')
+
+    context.detailedGeometry = {
+        doorMeshes: [doorMesh],
+        wallMeshes: [hostWallMesh],
+        nearbyWallMeshes: [perpWallMesh],
+        slabMeshes: [],
+        ceilingMeshes: [],
+        nearbyDoorMeshes: [],
+        stairMeshes: [],
+        deviceMeshes: [],
+    }
+
+    return context
+}
+
+/**
+ * Adjacent-doors fixture: two doors hosted by the same wall with a small
+ * horizontal gap between them. Used to verify that `findNearbyDoors` identifies
+ * the neighbour and that both plan views render without geometry corruption
+ * when the mesh-section renderer encounters the full host wall.
+ */
+async function buildAdjacentDoorsContexts(): Promise<{ primary: DoorContext; secondary: DoorContext }> {
+    const door1Center = new THREE.Vector3(0, 1.05, 0)
+    const door2Center = new THREE.Vector3(1.5, 1.05, 0)
+    const hostWallCenter = new THREE.Vector3(0, 1.5, 0)
+
+    const door1Mesh = createBoxMesh(1, 1, 2.1, 0.12, door1Center)
+    const door2Mesh = createBoxMesh(2, 1, 2.1, 0.12, door2Center)
+    const hostWallMesh = createBoxMesh(3, 40, 3, 0.24, hostWallCenter)
+
+    const door1 = makeElement(1, 'IFCDOOR', door1Mesh)
+    const door2 = makeElement(2, 'IFCDOOR', door2Mesh)
+    const hostWall = makeElement(3, 'IFCWALL', hostWallMesh)
+
+    const model: LoadedIFCModel = {
+        group: new THREE.Group(),
+        elements: [door1, door2, hostWall],
+        modelID: 0,
+        api: null,
+    }
+    ;(model as LoadedIFCModel & { fragmentsModel: { getItemsData: () => Promise<unknown[]> } }).fragmentsModel = {
+        getItemsData: async () => [],
+    }
+
+    const contexts = await analyzeDoors(
+        model,
+        undefined,
+        undefined,
+        new Map([
+            [door1.expressID, 'SINGLE_SWING_LEFT'],
+            [door2.expressID, 'SINGLE_SWING_RIGHT'],
+        ])
+    )
+    assert.equal(contexts.length, 2, 'Expected two door contexts for adjacent-door fixture')
+
+    for (const ctx of contexts) {
+        const ownMesh = ctx.door.expressID === door1.expressID ? door1Mesh : door2Mesh
+        ctx.detailedGeometry = {
+            doorMeshes: [ownMesh],
+            wallMeshes: [hostWallMesh],
+            nearbyWallMeshes: [],
+            slabMeshes: [],
+            ceilingMeshes: [],
+            nearbyDoorMeshes: [],
+            stairMeshes: [],
+            deviceMeshes: [],
+        }
+    }
+
+    const primary = contexts.find((c) => c.door.expressID === door1.expressID)
+    const secondary = contexts.find((c) => c.door.expressID === door2.expressID)
+    assert.ok(primary && secondary, 'Expected both primary and secondary door contexts')
+    return { primary, secondary }
+}
+
 function getLargestWallRectY(svg: string, fill: string): number | null {
     const rectTags = svg.match(/<rect\b[^>]*>/g) || []
     let bestArea = -Infinity
@@ -347,6 +478,22 @@ function getLargestWallRectY(svg: string, fill: string): number | null {
 }
 
 async function main() {
+    // ── Operation-type parsing regression ────────────────────────────────────
+    // DOUBLE_SWING_LEFT / DOUBLE_SWING_RIGHT are distinct IfcDoorTypeOperationEnum
+    // values (single-leaf double-acting with specific handedness). They must be
+    // matched with the correct `hingeSide` before the generic DOUBLE_SWING /
+    // DOUBLE_DOOR_* fallback, otherwise they fall through and default to
+    // `hingeSide: 'right'`, breaking handedness mirroring.
+    const doubleSwingLeft  = getDoorOperationInfo('DOUBLE_SWING_LEFT')
+    const doubleSwingRight = getDoorOperationInfo('DOUBLE_SWING_RIGHT')
+    const doubleSwingBoth  = getDoorOperationInfo('DOUBLE_SWING')
+    assert.equal(doubleSwingLeft.kind,       'swing', 'DOUBLE_SWING_LEFT should be parsed as a swing')
+    assert.equal(doubleSwingLeft.hingeSide,  'left',  'DOUBLE_SWING_LEFT must preserve left handedness')
+    assert.equal(doubleSwingRight.kind,      'swing', 'DOUBLE_SWING_RIGHT should be parsed as a swing')
+    assert.equal(doubleSwingRight.hingeSide, 'right', 'DOUBLE_SWING_RIGHT must preserve right handedness')
+    assert.equal(doubleSwingBoth.kind,       'swing', 'DOUBLE_SWING should be parsed as a swing')
+    assert.equal(doubleSwingBoth.hingeSide,  'both',  'Bare DOUBLE_SWING should report both hinges')
+
     const options: SVGRenderOptions = {
         width: 1000,
         height: 1000,
@@ -448,6 +595,32 @@ async function main() {
         openingDirection: 'SINGLE_SWING_LEFT',
         placementYAxis: new THREE.Vector3(0, 0, -1),
     })
+    // Handedness coverage: flipping IFC placementYAxis must flip the hinge side in plan.
+    const handednessLeftPlusZ  = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_LEFT',
+        placementYAxis: new THREE.Vector3(0, 0, 1),
+    })
+    const handednessLeftMinusZ = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_LEFT',
+        placementYAxis: new THREE.Vector3(0, 0, -1),
+    })
+    const handednessRightPlusZ  = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_RIGHT',
+        placementYAxis: new THREE.Vector3(0, 0, 1),
+    })
+    const handednessRightMinusZ = await buildContext({
+        includeWall: true,
+        openingDirection: 'SINGLE_SWING_RIGHT',
+        placementYAxis: new THREE.Vector3(0, 0, -1),
+    })
+    const handednessDoubleDoorPlusZ = await buildContext({
+        includeWall: true,
+        openingDirection: 'DOUBLE_DOOR_SINGLE_SWING',
+        placementYAxis: new THREE.Vector3(0, 0, 1),
+    })
     const sideFixedLeftCtx = await buildContext({
         includeWall: true,
         openingDirection: 'SWING_FIXED_LEFT',
@@ -487,6 +660,11 @@ async function main() {
     const upwardArcViews = await renderDoorViews(upwardArcCtx,  options)
     const sideFixedLeftViews = await renderDoorViews(sideFixedLeftCtx, options)
     const sideFixedRightViews = await renderDoorViews(sideFixedRightCtx, options)
+    const handednessLeftPlusZViews   = await renderDoorViews(handednessLeftPlusZ,  options)
+    const handednessLeftMinusZViews  = await renderDoorViews(handednessLeftMinusZ, options)
+    const handednessRightPlusZViews  = await renderDoorViews(handednessRightPlusZ, options)
+    const handednessRightMinusZViews = await renderDoorViews(handednessRightMinusZ,options)
+    const handednessDoubleDoorViews  = await renderDoorViews(handednessDoubleDoorPlusZ, options)
 
     const leftPlan   = leftPlanViews.plan
     const rightPlan  = rightPlanViews.plan
@@ -521,6 +699,50 @@ async function main() {
     assert.ok(rightGuide.x1 > options.width! / 2, 'Right swing guide should originate from the right hinge side')
     assert.ok(sideFixedLeftGuide.x1 < options.width! / 2, 'Fixed-left sidelight should hinge from the left jamb')
     assert.ok(sideFixedRightGuide.x1 > options.width! / 2, 'Fixed-right sidelight should hinge from the right jamb')
+
+    // IFC handedness invariant: flipping placementYAxis (local +Y direction) must
+    // flip the hinge side for ALL swing-capable operation types. The renderer's
+    // `widthAxis` depends on `semanticFacing`, which can be guessed with either
+    // sign; the mirror logic compensates so that IFC LEFT/RIGHT always maps to
+    // the correct world-side regardless of that ambiguity.
+    const handednessLeftPlusZGuide   = getLongestDashedGuide(handednessLeftPlusZViews.plan)
+    const handednessLeftMinusZGuide  = getLongestDashedGuide(handednessLeftMinusZViews.plan)
+    const handednessRightPlusZGuide  = getLongestDashedGuide(handednessRightPlusZViews.plan)
+    const handednessRightMinusZGuide = getLongestDashedGuide(handednessRightMinusZViews.plan)
+    assert.ok(handednessLeftPlusZGuide,   'SINGLE_SWING_LEFT with placementYAxis=+Z should render a swing guide')
+    assert.ok(handednessLeftMinusZGuide,  'SINGLE_SWING_LEFT with placementYAxis=-Z should render a swing guide')
+    assert.ok(handednessRightPlusZGuide,  'SINGLE_SWING_RIGHT with placementYAxis=+Z should render a swing guide')
+    assert.ok(handednessRightMinusZGuide, 'SINGLE_SWING_RIGHT with placementYAxis=-Z should render a swing guide')
+    const midX = options.width! / 2
+    const leftPlusZOnLeft   = handednessLeftPlusZGuide.x1   < midX
+    const leftMinusZOnLeft  = handednessLeftMinusZGuide.x1  < midX
+    const rightPlusZOnLeft  = handednessRightPlusZGuide.x1  < midX
+    const rightMinusZOnLeft = handednessRightMinusZGuide.x1 < midX
+    assert.notEqual(
+        leftPlusZOnLeft,
+        leftMinusZOnLeft,
+        'Flipping placementYAxis must mirror SINGLE_SWING_LEFT hinge side (otherwise IFC handedness is ignored)'
+    )
+    assert.notEqual(
+        rightPlusZOnLeft,
+        rightMinusZOnLeft,
+        'Flipping placementYAxis must mirror SINGLE_SWING_RIGHT hinge side (otherwise IFC handedness is ignored)'
+    )
+    // LEFT and RIGHT with the SAME placementYAxis must hinge on opposite sides.
+    assert.notEqual(
+        leftPlusZOnLeft,
+        rightPlusZOnLeft,
+        'SINGLE_SWING_LEFT and SINGLE_SWING_RIGHT must hinge on opposite sides for the same placementYAxis'
+    )
+    assert.notEqual(
+        leftMinusZOnLeft,
+        rightMinusZOnLeft,
+        'SINGLE_SWING_LEFT and SINGLE_SWING_RIGHT must hinge on opposite sides for the same placementYAxis'
+    )
+    // Double doors (hingeSide='both') must still render a symbolic swing; hinge mirroring
+    // is a no-op for symmetric leaves but the renderer must not crash or drop the swing.
+    const handednessDoubleDoorGuide = getLongestDashedGuide(handednessDoubleDoorViews.plan)
+    assert.ok(handednessDoubleDoorGuide, 'DOUBLE_DOOR_SINGLE_SWING with placementYAxis=+Z should still render a swing guide')
 
     // Default synthetic setup opens downward: y2 > y1.
     assert.ok(leftGuide.y2  > leftGuide.y1,  'Left swing arc should open downward (into room)')
@@ -581,6 +803,132 @@ async function main() {
         assertCoordinatesWithinBounds(svg, options.width!, canvasH)
     }
 
+    const highMountedDeviceContext = await buildContext({
+        includeWall: true,
+        deviceCenterY: 2.15,
+        includeCeiling: true,
+        includeStair: true,
+    })
+    // Render this fixture with a distinct floorSlabColor so the ceiling/stair
+    // assertions measure real slab-context fills. If we re-used the default
+    // (which falls back to wallColor), the host-wall fill alone would satisfy
+    // the area threshold and mask slab-rendering regressions.
+    const highMountedOptions = { ...options, floorSlabColor: '#6EAF72' }
+    const highMountedDeviceViews = await renderDoorViews(highMountedDeviceContext, highMountedOptions)
+    const highMountedPlanDevicePaths = extractPathDataByFill(highMountedDeviceViews.plan, highMountedOptions.deviceColor!)
+    assert.ok(
+        highMountedDeviceContext.hostCeilings.length > 0,
+        'Expected IFCCOVERING elements to be collected as host ceilings'
+    )
+    assert.ok(
+        highMountedDeviceContext.nearbyStairs.length > 0,
+        'Expected IFCSTAIR elements to be collected as nearby stairs'
+    )
+    assert.deepEqual(
+        highMountedPlanDevicePaths,
+        [],
+        'Devices above the plan cut should not render in plan view'
+    )
+    const slabColor = highMountedOptions.floorSlabColor!
+    assert.ok(
+        getWallFilledArea(highMountedDeviceViews.front, slabColor) > 1200,
+        'Front elevation should render ceiling/stair slab-color context'
+    )
+    assert.ok(
+        getWallFilledArea(highMountedDeviceViews.back, slabColor) > 1200,
+        'Back elevation should render ceiling/stair slab-color context'
+    )
+
+    // ── Mesh-based plan section: L-corner + adjacent doors ────────────────────
+    // Plan views now project actual wall meshes at the door's cut plane instead
+    // of drawing two synthetic rectangular stubs. These fixtures verify that
+    //   (a) perpendicular walls meeting the host wall become visible in plan, and
+    //   (b) adjacent doors in the same host wall don't corrupt the plan view.
+    const lCornerContext = await buildLCornerContext()
+    assert.equal(
+        lCornerContext.nearbyWalls.length,
+        1,
+        'L-corner: analyzer should pick up exactly one perpendicular wall',
+    )
+    assert.equal(
+        lCornerContext.nearbyWalls[0].expressID,
+        3,
+        'L-corner: the perpendicular wall should be the detected nearby wall',
+    )
+    assert.ok(
+        lCornerContext.detailedGeometry?.nearbyWallMeshes?.length === 1,
+        'L-corner: nearby-wall meshes must be carried into detailedGeometry',
+    )
+
+    const lCornerViews = await renderDoorViews(lCornerContext, options)
+    const lCornerPlanArea = getWallFilledArea(lCornerViews.plan, options.wallColor!)
+    const baselinePlanArea = getWallFilledArea(withWallViews.plan, options.wallColor!)
+    assert.ok(
+        lCornerPlanArea > baselinePlanArea + 1000,
+        `L-corner plan view should carry more wall fill area than the single-host-wall baseline (got ${lCornerPlanArea.toFixed(0)} vs ${baselinePlanArea.toFixed(0)})`,
+    )
+
+    // Confirm the perpendicular wall actually extends the wall footprint in the
+    // depth direction (not just laterally). We compare the vertical span of the
+    // wall fill polygons — baseline's thin host-wall cut should be much
+    // shallower than the L-corner's footprint that reaches into -depth.
+    const lCornerRenderedBounds = getRenderedContentBounds(lCornerViews.plan)
+    const baselineRenderedBounds = getRenderedContentBounds(withWallViews.plan)
+    assert.ok(lCornerRenderedBounds && baselineRenderedBounds, 'Expected plan bounds to be measurable')
+    const lCornerDepthSpan = lCornerRenderedBounds!.maxY - lCornerRenderedBounds!.minY
+    const baselineDepthSpan = baselineRenderedBounds!.maxY - baselineRenderedBounds!.minY
+    assert.ok(
+        lCornerDepthSpan > baselineDepthSpan + 5,
+        `L-corner plan view should extend deeper than baseline (got span ${lCornerDepthSpan.toFixed(1)} vs ${baselineDepthSpan.toFixed(1)})`,
+    )
+    for (const [viewName, svg] of Object.entries(lCornerViews)) {
+        const canvasH = viewName === 'plan' ? planH : options.height!
+        assertCoordinatesWithinBounds(svg, options.width!, canvasH)
+    }
+
+    // Adjacent doors in the same host wall.
+    const { primary: adjacentPrimary, secondary: adjacentSecondary } = await buildAdjacentDoorsContexts()
+    assert.equal(
+        adjacentPrimary.nearbyDoors.length,
+        1,
+        'Adjacent doors: the primary context should record its neighbour',
+    )
+    assert.equal(
+        adjacentPrimary.nearbyDoors[0].expressID,
+        adjacentSecondary.door.expressID,
+        'Adjacent doors: the recorded neighbour should be the second door',
+    )
+    assert.equal(
+        adjacentPrimary.nearbyWalls.length,
+        0,
+        'Adjacent doors: a door is not a wall — nearbyWalls must stay empty when there is only the host wall',
+    )
+
+    const adjacentPrimaryViews = await renderDoorViews(adjacentPrimary, options)
+    const adjacentSecondaryViews = await renderDoorViews(adjacentSecondary, options)
+    const primaryPlanWallArea = getWallFilledArea(adjacentPrimaryViews.plan, options.wallColor!)
+    const secondaryPlanWallArea = getWallFilledArea(adjacentSecondaryViews.plan, options.wallColor!)
+    assert.ok(
+        primaryPlanWallArea > 1000,
+        `Adjacent doors: primary plan should contain non-degenerate wall fill (got ${primaryPlanWallArea.toFixed(0)})`,
+    )
+    assert.ok(
+        secondaryPlanWallArea > 1000,
+        `Adjacent doors: secondary plan should contain non-degenerate wall fill (got ${secondaryPlanWallArea.toFixed(0)})`,
+    )
+    assert.ok(
+        getWallFilledArea(adjacentPrimaryViews.plan, '#d1d5db') > 100,
+        'Adjacent doors: primary plan should render nearby-door context geometry'
+    )
+    assert.ok(
+        getWallFilledArea(adjacentSecondaryViews.plan, '#d1d5db') > 100,
+        'Adjacent doors: secondary plan should render nearby-door context geometry'
+    )
+    for (const svg of [...Object.values(adjacentPrimaryViews), ...Object.values(adjacentSecondaryViews)]) {
+        const canvasH = planH // use plan height as upper bound (conservative)
+        assertCoordinatesWithinBounds(svg, options.width!, Math.max(canvasH, options.height!))
+    }
+
     // Write fixtures for visual inspection
     const { writeFileSync, mkdirSync } = await import('node:fs')
     const dir = 'test-output/door-wall-context'
@@ -594,6 +942,9 @@ async function main() {
     for (const [view, svg] of Object.entries(backMountedViews)) {
         writeFileSync(`${dir}/back-mounted-${view}.svg`, svg)
     }
+    for (const [view, svg] of Object.entries(highMountedDeviceViews)) {
+        writeFileSync(`${dir}/high-mounted-device-${view}.svg`, svg)
+    }
     // Plan-specific fixtures
     writeFileSync(`${dir}/plan-left-swing.svg`, leftPlan)
     writeFileSync(`${dir}/plan-right-swing.svg`, rightPlan)
@@ -603,6 +954,20 @@ async function main() {
     writeFileSync(`${dir}/plan-upward-arc.svg`, upwardArcPlan)
     writeFileSync(`${dir}/plan-fixed-left-sidelight.svg`, sideFixedLeftPlan)
     writeFileSync(`${dir}/plan-fixed-right-sidelight.svg`, sideFixedRightPlan)
+    writeFileSync(`${dir}/plan-handedness-left-plusZ.svg`,   handednessLeftPlusZViews.plan)
+    writeFileSync(`${dir}/plan-handedness-left-minusZ.svg`,  handednessLeftMinusZViews.plan)
+    writeFileSync(`${dir}/plan-handedness-right-plusZ.svg`,  handednessRightPlusZViews.plan)
+    writeFileSync(`${dir}/plan-handedness-right-minusZ.svg`, handednessRightMinusZViews.plan)
+    writeFileSync(`${dir}/plan-handedness-double-plusZ.svg`, handednessDoubleDoorViews.plan)
+    for (const [view, svg] of Object.entries(lCornerViews)) {
+        writeFileSync(`${dir}/l-corner-${view}.svg`, svg)
+    }
+    for (const [view, svg] of Object.entries(adjacentPrimaryViews)) {
+        writeFileSync(`${dir}/adjacent-primary-${view}.svg`, svg)
+    }
+    for (const [view, svg] of Object.entries(adjacentSecondaryViews)) {
+        writeFileSync(`${dir}/adjacent-secondary-${view}.svg`, svg)
+    }
 
     console.log('Door wall context regression test passed')
 }
