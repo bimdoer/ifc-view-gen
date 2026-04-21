@@ -780,6 +780,11 @@ function isStairType(typeName: string, ifcType?: number): boolean {
  * Checks if an element type represents an electrical device
  */
 function isElectricalDeviceType(typeName: string): boolean {
+    // IfcCableSegment must not be treated as a nearby electrical device (excluded from plan/elevation SVG).
+    // Must run before lower.includes('cable'), since "IFCCABLESEGMENT" contains the substring "cable".
+    if (typeName.toUpperCase() === 'IFCCABLESEGMENT') {
+        return false
+    }
     const lower = typeName.toLowerCase()
     return (
         lower.includes('electrical') ||
@@ -812,7 +817,6 @@ function isElectricalDeviceType(typeName: string): boolean {
         typeName === 'IFCELECTRICDISTRIBUTIONBOARD' ||
         typeName === 'IFCJUNCTIONBOX' ||
         typeName === 'IFCCABLECARRIERSEGMENT' ||
-        typeName === 'IFCCABLESEGMENT' ||
         typeName === 'IFCELECTRICAPPLIANCE' ||
         typeName.startsWith('IFCELECTRICAPPLIANCE')
     )
