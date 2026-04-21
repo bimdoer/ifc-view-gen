@@ -4391,7 +4391,7 @@ function generateSingleLeafArc(
         color: '#666666', // Same color as arc
         depth: (hingeProj.z + openDoorProj.z) / 2,
         layer: 0,
-        isDashed: true,
+        isDashed: false,
         strokeWidthFactor: DOOR_EDGE_STROKE_FACTOR,
     })
 
