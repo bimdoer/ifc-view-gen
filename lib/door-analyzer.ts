@@ -3,6 +3,18 @@ import type { ElementInfo, LoadedIFCModel } from './ifc-types'
 import * as WebIFC from 'web-ifc'
 import type { DoorCsetStandardCHData, DoorLeafMetadata } from './ifc-loader'
 
+/** Parts from `extractWallAggregateParts` may have no `LoadedIFCModel.elements` entry (fragments scope); geometry still loads by expressID. */
+function createWallAggregatePartStub(partExpressID: number): ElementInfo {
+    const mesh = new THREE.Mesh()
+    mesh.userData.expressID = partExpressID
+    return {
+        expressID: partExpressID,
+        ifcType: WebIFC.IFCBUILDINGELEMENTPART,
+        typeName: 'IFCBUILDINGELEMENTPART',
+        mesh,
+    }
+}
+
 export interface DoorViewFrame {
     origin: THREE.Vector3
     widthAxis: THREE.Vector3
@@ -41,6 +53,11 @@ export interface NearbyDeviceVisibility {
 export type DoorContextHostSource = 'ifc-relation' | 'bbox-fallback' | 'none'
 export type DoorContextViewFrameSource = 'analyze-door-geometry'
 
+export interface WallAggregatePartLink {
+    part: ElementInfo
+    parentWallExpressID: number
+}
+
 export interface DoorContextDiagnostics {
     hostSource: DoorContextHostSource
     relationHostExpressID: number | null
@@ -49,9 +66,11 @@ export interface DoorContextDiagnostics {
     detailedDoorMeshCount?: number
     detailedWallMeshCount?: number
     detailedNearbyWallMeshCount?: number
+    detailedWallAggregatePartMeshCount?: number
     detailedSlabMeshCount?: number
     detailedCeilingMeshCount?: number
     detailedNearbyDoorMeshCount?: number
+    detailedNearbyWindowMeshCount?: number
     detailedStairMeshCount?: number
     detailedDeviceMeshCount?: number
     detailedViewFrame?: DoorViewFrame
@@ -67,6 +86,8 @@ export interface DoorContext {
     hostSlabsAbove: ElementInfo[]
     hostCeilings: ElementInfo[]
     nearbyDoors: ElementInfo[]
+    /** IfcWindow (and similar) instances in the same plan band as {@link nearbyWalls} — plan / elevation context. */
+    nearbyWindows: ElementInfo[]
     /**
      * Walls located within the plan viewport band around the door, excluding the
      * host wall itself. Populated so that plan-view rendering can section real
@@ -74,6 +95,11 @@ export interface DoorContext {
      * at the door's cut plane instead of drawing two synthetic jamb rectangles.
      */
     nearbyWalls: ElementInfo[]
+    /**
+     * IfcBuildingElementPart instances aggregated under the host or nearby walls
+     * (IfcRelAggregates), e.g. insulation / concrete skins — used for plan sectioning.
+     */
+    wallAggregatePartLinks: WallAggregatePartLink[]
     nearbyStairs: ElementInfo[]
     nearbyDevices: ElementInfo[]
     nearbyDeviceVisibility: NearbyDeviceVisibility[]
@@ -113,9 +139,12 @@ export interface DoorContext {
         wallMeshes: THREE.Mesh[]
         /** Meshes for walls adjacent to the door — perpendicular / neighbouring walls used for plan-section rendering. Never includes host-wall meshes. */
         nearbyWallMeshes: THREE.Mesh[]
+        /** Meshes for {@link DoorContext.wallAggregatePartLinks} (IfcBuildingElementPart under host/nearby walls). */
+        wallAggregatePartMeshes: THREE.Mesh[]
         slabMeshes: THREE.Mesh[]
         ceilingMeshes: THREE.Mesh[]
         nearbyDoorMeshes: THREE.Mesh[]
+        nearbyWindowMeshes: THREE.Mesh[]
         stairMeshes: THREE.Mesh[]
         deviceMeshes: THREE.Mesh[]
     }
@@ -702,6 +731,16 @@ function isDoorType(typeName: string, ifcType?: number): boolean {
             ifcType === WebIFC.IFCDOOR ||
             ifcType === 64
         ))
+    )
+}
+
+function isWindowType(typeName: string, ifcType?: number): boolean {
+    const lower = typeName.toLowerCase()
+    return (
+        lower.includes('window')
+        || typeName === 'IFCWINDOW'
+        || typeName.startsWith('IFCWINDOW')
+        || (ifcType !== undefined && ifcType === WebIFC.IFCWINDOW)
     )
 }
 
@@ -1870,6 +1909,136 @@ function findNearbyDoors(
 }
 
 /**
+ * Other IfcDoor instances whose bbox lies in the same plan band as {@link findNearbyWalls},
+ * regardless of host wall — complements {@link findNearbyDoors} (same-wall only).
+ */
+function findSpatialNearbyDoorsInPlanBand(
+    door: ElementInfo,
+    doors: ElementInfo[],
+    _hostWall: ElementInfo | null,
+    viewFrame: DoorViewFrame,
+    excludeExpressIds: Set<number>,
+    lateralRadius: number = 1.6,
+    depthRadius: number = 1.2,
+    limit: number = 12
+): ElementInfo[] {
+    if (!door.boundingBox) return []
+
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const depthAxis = viewFrame.semanticFacing.clone().normalize()
+
+    const originWidth = viewFrame.origin.dot(widthAxis)
+    const originUp = viewFrame.origin.dot(upAxis)
+    const originDepth = viewFrame.origin.dot(depthAxis)
+
+    const halfWidth = viewFrame.width / 2
+    const halfHeight = viewFrame.height / 2
+    const widthBandMin = originWidth - halfWidth - lateralRadius
+    const widthBandMax = originWidth + halfWidth + lateralRadius
+    const upBandMin = originUp - halfHeight - 0.1
+    const upBandMax = originUp + halfHeight + 0.1
+    const depthBandMin = originDepth - depthRadius
+    const depthBandMax = originDepth + depthRadius
+
+    const candidates = doors
+        .filter((d) =>
+            d.expressID !== door.expressID
+            && !excludeExpressIds.has(d.expressID)
+            && Boolean(d.boundingBox)
+        )
+        .map((other) => {
+            const widthRange = measureBoxAlongAxis(other.boundingBox!, widthAxis)
+            const upRange = measureBoxAlongAxis(other.boundingBox!, upAxis)
+            const depthRange = measureBoxAlongAxis(other.boundingBox!, depthAxis)
+
+            if (!rangesOverlap(widthRange.min, widthRange.max, widthBandMin, widthBandMax)) {
+                return null
+            }
+            if (!rangesOverlap(upRange.min, upRange.max, upBandMin, upBandMax)) {
+                return null
+            }
+            if (!rangesOverlap(depthRange.min, depthRange.max, depthBandMin, depthBandMax)) {
+                return null
+            }
+
+            const widthOverlap = getIntervalOverlapLength(
+                widthRange.min, widthRange.max,
+                widthBandMin, widthBandMax
+            )
+            const depthOverlap = getIntervalOverlapLength(
+                depthRange.min, depthRange.max,
+                depthBandMin, depthBandMax
+            )
+            const widthCenter = (widthRange.min + widthRange.max) / 2
+            const depthCenter = (depthRange.min + depthRange.max) / 2
+            const lateralDistance = Math.abs(widthCenter - originWidth)
+            const depthDistance = Math.abs(depthCenter - originDepth)
+
+            const doorwayWidthGap = Math.max(
+                widthBandMin - widthRange.max,
+                widthRange.min - widthBandMax,
+                0
+            )
+            const doorPlaneGap = Math.max(
+                depthBandMin - depthRange.max,
+                depthRange.min - depthBandMax,
+                0
+            )
+
+            return {
+                door: other,
+                score:
+                    lateralDistance
+                    + depthDistance
+                    + doorwayWidthGap * 2.5
+                    + doorPlaneGap * 3
+                    - (widthOverlap + depthOverlap) * 0.6,
+            }
+        })
+        .filter((entry): entry is { door: ElementInfo; score: number } => entry !== null)
+        .sort((a, b) => a.score - b.score || a.door.expressID - b.door.expressID)
+
+    return candidates.slice(0, limit).map((entry) => entry.door)
+}
+
+function mergeNearbyDoorsForContext(
+    targetContext: DoorContext,
+    allContexts: DoorContext[],
+    primaryDoors: ElementInfo[],
+    sameWallLimit: number = 4,
+    mergedMax: number = 12
+): ElementInfo[] {
+    const sameWall = findNearbyDoors(targetContext, allContexts, sameWallLimit)
+    const seen = new Set<number>([targetContext.door.expressID])
+    for (const d of sameWall) seen.add(d.expressID)
+    const spatial = findSpatialNearbyDoorsInPlanBand(
+        targetContext.door,
+        primaryDoors,
+        targetContext.hostWall,
+        targetContext.viewFrame,
+        seen,
+        1.6,
+        1.2,
+        mergedMax
+    )
+    const merged: ElementInfo[] = []
+    const mergedIds = new Set<number>()
+    for (const d of sameWall) {
+        if (mergedIds.has(d.expressID)) continue
+        mergedIds.add(d.expressID)
+        merged.push(d)
+    }
+    for (const d of spatial) {
+        if (merged.length >= mergedMax) break
+        if (mergedIds.has(d.expressID)) continue
+        mergedIds.add(d.expressID)
+        merged.push(d)
+    }
+    return merged
+}
+
+/**
  * Find walls in the model that sit within the plan viewport around a door and
  * should participate in the plan-section rendering. This is how perpendicular
  * walls at an L-corner, wall returns, or partitions meeting the host wall at
@@ -1972,6 +2141,95 @@ function findNearbyWalls(
         .sort((a, b) => a.score - b.score || a.wall.expressID - b.wall.expressID)
 
     return candidates.slice(0, limit).map((entry) => entry.wall)
+}
+
+/**
+ * IfcWindow / façade openings in the same door plan band as {@link findNearbyWalls}
+ * (primary-model windows only — caller should pass that list).
+ */
+function findNearbyWindows(
+    door: ElementInfo,
+    windows: ElementInfo[],
+    _hostWall: ElementInfo | null,
+    viewFrame: DoorViewFrame,
+    lateralRadius: number = 1.6,
+    depthRadius: number = 1.2,
+    limit: number = 20
+): ElementInfo[] {
+    if (!door.boundingBox) return []
+
+    const widthAxis = viewFrame.widthAxis.clone().normalize()
+    const upAxis = viewFrame.upAxis.clone().normalize()
+    const depthAxis = viewFrame.semanticFacing.clone().normalize()
+
+    const originWidth = viewFrame.origin.dot(widthAxis)
+    const originUp = viewFrame.origin.dot(upAxis)
+    const originDepth = viewFrame.origin.dot(depthAxis)
+
+    const halfWidth = viewFrame.width / 2
+    const halfHeight = viewFrame.height / 2
+    const widthBandMin = originWidth - halfWidth - lateralRadius
+    const widthBandMax = originWidth + halfWidth + lateralRadius
+    const upBandMin = originUp - halfHeight - 0.1
+    const upBandMax = originUp + halfHeight + 0.1
+    const depthBandMin = originDepth - depthRadius
+    const depthBandMax = originDepth + depthRadius
+
+    const candidates = windows
+        .filter((win) => Boolean(win.boundingBox))
+        .map((win) => {
+            const widthRange = measureBoxAlongAxis(win.boundingBox!, widthAxis)
+            const upRange = measureBoxAlongAxis(win.boundingBox!, upAxis)
+            const depthRange = measureBoxAlongAxis(win.boundingBox!, depthAxis)
+
+            if (!rangesOverlap(widthRange.min, widthRange.max, widthBandMin, widthBandMax)) {
+                return null
+            }
+            if (!rangesOverlap(upRange.min, upRange.max, upBandMin, upBandMax)) {
+                return null
+            }
+            if (!rangesOverlap(depthRange.min, depthRange.max, depthBandMin, depthBandMax)) {
+                return null
+            }
+
+            const widthOverlap = getIntervalOverlapLength(
+                widthRange.min, widthRange.max,
+                widthBandMin, widthBandMax
+            )
+            const depthOverlap = getIntervalOverlapLength(
+                depthRange.min, depthRange.max,
+                depthBandMin, depthBandMax
+            )
+            const widthCenter = (widthRange.min + widthRange.max) / 2
+            const depthCenter = (depthRange.min + depthRange.max) / 2
+            const lateralDistance = Math.abs(widthCenter - originWidth)
+            const depthDistance = Math.abs(depthCenter - originDepth)
+
+            const doorwayWidthGap = Math.max(
+                widthBandMin - widthRange.max,
+                widthRange.min - widthBandMax,
+                0
+            )
+            const doorPlaneGap = Math.max(
+                depthBandMin - depthRange.max,
+                depthRange.min - depthBandMax,
+                0
+            )
+
+            return {
+                win,
+                score:
+                    lateralDistance
+                    + depthDistance
+                    + doorwayWidthGap * 2.5
+                    + doorPlaneGap * 3
+                    - (widthOverlap + depthOverlap) * 0.6,
+            }
+        })
+        .filter((entry): entry is { win: ElementInfo; score: number } => entry !== null)
+        .sort((a, b) => a.score - b.score || a.win.expressID - b.win.expressID)
+
+    return candidates.slice(0, limit).map((entry) => entry.win)
 }
 
 /**
@@ -2164,7 +2422,8 @@ export async function analyzeDoors(
     csetStandardCHMap?: Map<number, DoorCsetStandardCHData>,
     doorLeafMetadataMap?: Map<number, DoorLeafMetadata>,
     hostRelationshipMap?: Map<number, number>,
-    slabAggregatePartMap?: Map<number, number>
+    slabAggregatePartMap?: Map<number, number>,
+    wallAggregatePartMap?: Map<number, number>
 ): Promise<DoorContext[]> {
     // Build storey map from spatial structure for quick lookup
     const storeyMap = buildStoreyMap(spatialStructure)
@@ -2172,6 +2431,7 @@ export async function analyzeDoors(
     // Separate elements by type
     const doors: ElementInfo[] = []
     const walls: ElementInfo[] = []
+    const windows: ElementInfo[] = []
     const slabs: ElementInfo[] = []
     const coverings: ElementInfo[] = []
     const stairs: ElementInfo[] = []
@@ -2183,6 +2443,8 @@ export async function analyzeDoors(
             if (isDoorType(element.typeName, element.ifcType)) {
                 doors.push(element)
                 // console.log(`Found door: ExpressID ${element.expressID}, typeName="${element.typeName}"`)
+            } else if (isWindowType(element.typeName, element.ifcType)) {
+                windows.push(element)
             } else if (isWallType(element.typeName, element.ifcType)) {
                 walls.push(element)
             } else if (
@@ -2212,6 +2474,9 @@ export async function analyzeDoors(
     for (const wall of walls) {
         wallByExpressID.set(wall.expressID, wall)
     }
+
+    const primaryWindows = windows.filter((w) => model.elements.includes(w))
+    const primaryDoors = doors.filter((d) => model.elements.includes(d))
 
     // Analyze each door
     const doorContexts: DoorContext[] = []
@@ -2272,6 +2537,83 @@ export async function analyzeDoors(
             classifyNearbyDeviceVisibility(device, hostWall, viewFrame)
         )
         const nearbyWalls = findNearbyWalls(door, walls, hostWall, viewFrame)
+        const nearbyWindows = findNearbyWindows(door, primaryWindows, hostWall, viewFrame)
+
+        const wallAggregatePartLinks: WallAggregatePartLink[] = []
+        if (wallAggregatePartMap && wallAggregatePartMap.size > 0) {
+            const parentWallIds = new Set<number>()
+            if (hostWall) parentWallIds.add(hostWall.expressID)
+            for (const w of nearbyWalls) parentWallIds.add(w.expressID)
+
+            const resolvePartElement = (partId: number): ElementInfo => {
+                const fromPrimary = model.elements.find((e) => e.expressID === partId)
+                if (fromPrimary) return fromPrimary
+                if (secondaryModel) {
+                    const fromSecondary = secondaryModel.elements.find((e) => e.expressID === partId)
+                    if (fromSecondary) return fromSecondary
+                }
+                return createWallAggregatePartStub(partId)
+            }
+
+            const contextWalls: ElementInfo[] = []
+            if (hostWall) contextWalls.push(hostWall)
+            for (const w of nearbyWalls) contextWalls.push(w)
+
+            const linkedPartIds = new Set<number>()
+
+            for (const [partId, parentWallId] of wallAggregatePartMap) {
+                if (!parentWallIds.has(parentWallId)) continue
+                wallAggregatePartLinks.push({
+                    part: resolvePartElement(partId),
+                    parentWallExpressID: parentWallId,
+                })
+                linkedPartIds.add(partId)
+            }
+
+            /**
+             * Layered / split IfcWall models: parts often aggregate under a different wall instance
+             * than the door's IfcRelFillsElement host. If the semantic parent is not host/nearby,
+             * attach the part to the closest host/nearby wall by bbox distance (plan-relevant skins).
+             */
+            const maxPartToContextWallM = 6
+            for (const [partId, parentWallId] of wallAggregatePartMap) {
+                if (linkedPartIds.has(partId)) continue
+                const part = resolvePartElement(partId)
+                let pBox: THREE.Box3 | undefined
+                if (part.boundingBox && !part.boundingBox.isEmpty()) {
+                    pBox = part.boundingBox
+                } else if (part.mesh) {
+                    const b = new THREE.Box3().setFromObject(part.mesh)
+                    pBox = b.isEmpty() ? undefined : b
+                }
+                if (!pBox) continue
+                const partCenter = pBox.getCenter(new THREE.Vector3())
+                let best: ElementInfo | null = null
+                let bestD = Infinity
+                for (const w of contextWalls) {
+                    let wBox: THREE.Box3 | undefined
+                    if (w.boundingBox && !w.boundingBox.isEmpty()) {
+                        wBox = w.boundingBox
+                    } else if (w.mesh) {
+                        const b = new THREE.Box3().setFromObject(w.mesh)
+                        wBox = b.isEmpty() ? undefined : b
+                    }
+                    if (!wBox) continue
+                    const d = wBox.distanceToPoint(partCenter)
+                    if (d < bestD) {
+                        bestD = d
+                        best = w
+                    }
+                }
+                if (best && bestD <= maxPartToContextWallM) {
+                    wallAggregatePartLinks.push({
+                        part,
+                        parentWallExpressID: best.expressID,
+                    })
+                    linkedPartIds.add(partId)
+                }
+            }
+        }
 
         const center = door.boundingBox
             ? door.boundingBox.getCenter(new THREE.Vector3())
@@ -2307,7 +2649,9 @@ export async function analyzeDoors(
             hostSlabsAbove,
             hostCeilings,
             nearbyDoors: [],
+            nearbyWindows,
             nearbyWalls,
+            wallAggregatePartLinks,
             nearbyStairs,
             nearbyDevices,
             nearbyDeviceVisibility,
@@ -2332,7 +2676,7 @@ export async function analyzeDoors(
     }
 
     for (const context of doorContexts) {
-        context.nearbyDoors = findNearbyDoors(context, doorContexts)
+        context.nearbyDoors = mergeNearbyDoorsForContext(context, doorContexts, primaryDoors)
     }
 
     return doorContexts
@@ -2357,6 +2701,9 @@ export function getDoorMeshes(
         const meshes = [...context.detailedGeometry.doorMeshes]
         if (includeHostWall) {
             meshes.push(...context.detailedGeometry.wallMeshes)
+            if (context.detailedGeometry.wallMeshes.length === 0 && context.hostWall) {
+                meshes.push(...collectMeshesFromElement(context.hostWall))
+            }
         }
         if (includeHostSlabs) {
             meshes.push(...context.detailedGeometry.slabMeshes)
@@ -2391,6 +2738,22 @@ export function getDoorMeshes(
     return meshes
 }
 
+/** IfcBuildingElementPart meshes aggregated under a given host or nearby wall. */
+export function getWallAggregatePartMeshesForParent(context: DoorContext, parentWallExpressID: number): THREE.Mesh[] {
+    const links = context.wallAggregatePartLinks?.filter((l) => l.parentWallExpressID === parentWallExpressID) ?? []
+    if (links.length === 0) return []
+    const wanted = new Set(links.map((l) => l.part.expressID))
+    const pooled = context.detailedGeometry?.wallAggregatePartMeshes
+    if (pooled && pooled.length > 0) {
+        return pooled.filter((m) => wanted.has(m.userData?.expressID))
+    }
+    const out: THREE.Mesh[] = []
+    for (const { part } of links) {
+        out.push(...collectMeshesFromElement(part))
+    }
+    return out
+}
+
 export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
     // Without a host wall there are no meshes to match. Guarding here also prevents
     // meshes that happen to have a missing `userData.expressID` from comparing
@@ -2399,12 +2762,15 @@ export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
         return []
     }
     const hostWallExpressID = context.hostWall.expressID
-    return getDoorMeshes(context, { includeHostWall: true }).filter(
+    const direct = getDoorMeshes(context, { includeHostWall: true }).filter(
         (mesh) => (
             mesh.userData.expressID === hostWallExpressID
             || mesh.userData.elementInfo?.expressID === hostWallExpressID
         )
     )
+    const partMeshes = getWallAggregatePartMeshesForParent(context, hostWallExpressID)
+    const merged = [...direct, ...partMeshes]
+    return merged
 }
 
 /**
@@ -2413,22 +2779,40 @@ export function getHostWallMeshes(context: DoorContext): THREE.Mesh[] {
  * T-intersections). Host-wall meshes are intentionally excluded.
  */
 export function getNearbyWallMeshes(context: DoorContext): THREE.Mesh[] {
+    const partMeshesForNearbyWalls = (): THREE.Mesh[] => {
+        const out: THREE.Mesh[] = []
+        const seenPart = new Set<number>()
+        for (const wall of context.nearbyWalls) {
+            for (const m of getWallAggregatePartMeshesForParent(context, wall.expressID)) {
+                const id = m.userData?.expressID
+                if (typeof id === 'number') {
+                    if (seenPart.has(id)) continue
+                    seenPart.add(id)
+                }
+                out.push(m)
+            }
+        }
+        return out
+    }
+
     if (context.nearbyWalls.length === 0) {
-        return []
+        return partMeshesForNearbyWalls()
     }
 
+    let base: THREE.Mesh[] = []
     if (context.detailedGeometry?.nearbyWallMeshes?.length) {
-        return [...context.detailedGeometry.nearbyWallMeshes]
+        base = [...context.detailedGeometry.nearbyWallMeshes]
+    } else {
+        const meshes: THREE.Mesh[] = []
+        const seenIDs = new Set<number>()
+        for (const wall of context.nearbyWalls) {
+            if (seenIDs.has(wall.expressID)) continue
+            seenIDs.add(wall.expressID)
+            meshes.push(...collectMeshesFromElement(wall))
+        }
+        base = meshes
     }
-
-    const meshes: THREE.Mesh[] = []
-    const seenIDs = new Set<number>()
-    for (const wall of context.nearbyWalls) {
-        if (seenIDs.has(wall.expressID)) continue
-        seenIDs.add(wall.expressID)
-        meshes.push(...collectMeshesFromElement(wall))
-    }
-    return meshes
+    return [...base, ...partMeshesForNearbyWalls()]
 }
 
 export function getHostSlabMeshes(context: DoorContext): THREE.Mesh[] {
@@ -2471,6 +2855,22 @@ export function getNearbyDoorMeshes(context: DoorContext): THREE.Mesh[] {
         if (seenIDs.has(nearbyDoor.expressID)) continue
         seenIDs.add(nearbyDoor.expressID)
         meshes.push(...collectMeshesFromElement(nearbyDoor))
+    }
+    return meshes
+}
+
+export function getNearbyWindowMeshes(context: DoorContext): THREE.Mesh[] {
+    if (!context.nearbyWindows?.length) return []
+    if (context.detailedGeometry?.nearbyWindowMeshes?.length) {
+        return [...context.detailedGeometry.nearbyWindowMeshes]
+    }
+
+    const meshes: THREE.Mesh[] = []
+    const seenIDs = new Set<number>()
+    for (const win of context.nearbyWindows) {
+        if (seenIDs.has(win.expressID)) continue
+        seenIDs.add(win.expressID)
+        meshes.push(...collectMeshesFromElement(win))
     }
     return meshes
 }
@@ -2554,8 +2954,10 @@ export async function loadDetailedGeometry(
     const slabIDs = new Set<number>()
     const ceilingIDs = new Set<number>()
     const nearbyDoorIDs = new Set<number>()
+    const nearbyWindowIDs = new Set<number>()
     const stairIDs = new Set<number>()
     const deviceIDs = new Set<number>()
+    const wallPartIDs = new Set<number>()
 
     for (const context of doorContexts) {
         doorIDs.add(context.door.expressID)
@@ -2565,6 +2967,9 @@ export async function loadDetailedGeometry(
         for (const wall of context.nearbyWalls) {
             wallIDs.add(wall.expressID)
         }
+        for (const { part } of context.wallAggregatePartLinks ?? []) {
+            wallPartIDs.add(part.expressID)
+        }
         for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
             slabIDs.add(slab.expressID)
         }
@@ -2573,6 +2978,9 @@ export async function loadDetailedGeometry(
         }
         for (const nearbyDoor of context.nearbyDoors) {
             nearbyDoorIDs.add(nearbyDoor.expressID)
+        }
+        for (const win of context.nearbyWindows ?? []) {
+            nearbyWindowIDs.add(win.expressID)
         }
         for (const stair of context.nearbyStairs) {
             stairIDs.add(stair.expressID)
@@ -2594,7 +3002,17 @@ export async function loadDetailedGeometry(
     }
 
     // Extract all geometry in one pass
-    const allIDs = [...doorIDs, ...wallIDs, ...slabIDs, ...ceilingIDs, ...nearbyDoorIDs, ...stairIDs, ...deviceIDs]
+    const allIDs = [
+        ...doorIDs,
+        ...wallIDs,
+        ...slabIDs,
+        ...ceilingIDs,
+        ...nearbyDoorIDs,
+        ...nearbyWindowIDs,
+        ...stairIDs,
+        ...deviceIDs,
+        ...wallPartIDs,
+    ]
     const geometryMap = await extractDetailedGeometry(file, allIDs)
     applyCenterOffset(geometryMap)
 
@@ -2627,6 +3045,13 @@ export async function loadDetailedGeometry(
             seenNearbyWallIDs.add(wall.expressID)
             nearbyWallMeshes.push(...(geometryMap.get(wall.expressID) || []))
         }
+        const wallAggregatePartMeshes: THREE.Mesh[] = []
+        const seenWallPartIDs = new Set<number>()
+        for (const { part } of context.wallAggregatePartLinks ?? []) {
+            if (seenWallPartIDs.has(part.expressID)) continue
+            seenWallPartIDs.add(part.expressID)
+            wallAggregatePartMeshes.push(...(geometryMap.get(part.expressID) || []))
+        }
         const slabMeshes: THREE.Mesh[] = []
         const seenSlabIDs = new Set<number>()
         for (const slab of [...context.hostSlabsBelow, ...context.hostSlabsAbove]) {
@@ -2648,6 +3073,13 @@ export async function loadDetailedGeometry(
             seenNearbyDoorIDs.add(nearbyDoor.expressID)
             nearbyDoorMeshes.push(...(geometryMap.get(nearbyDoor.expressID) || []))
         }
+        const nearbyWindowMeshes: THREE.Mesh[] = []
+        const seenNearbyWindowIDs = new Set<number>()
+        for (const win of context.nearbyWindows ?? []) {
+            if (seenNearbyWindowIDs.has(win.expressID)) continue
+            seenNearbyWindowIDs.add(win.expressID)
+            nearbyWindowMeshes.push(...(geometryMap.get(win.expressID) || []))
+        }
         const stairMeshes: THREE.Mesh[] = []
         const seenStairIDs = new Set<number>()
         for (const stair of context.nearbyStairs) {
@@ -2665,9 +3097,11 @@ export async function loadDetailedGeometry(
             doorMeshes,
             wallMeshes,
             nearbyWallMeshes,
+            wallAggregatePartMeshes,
             slabMeshes,
             ceilingMeshes,
             nearbyDoorMeshes,
+            nearbyWindowMeshes,
             stairMeshes,
             deviceMeshes,
         }
@@ -2683,9 +3117,11 @@ export async function loadDetailedGeometry(
             detailedDoorMeshCount: doorMeshes.length,
             detailedWallMeshCount: wallMeshes.length,
             detailedNearbyWallMeshCount: nearbyWallMeshes.length,
+            detailedWallAggregatePartMeshCount: wallAggregatePartMeshes.length,
             detailedSlabMeshCount: slabMeshes.length,
             detailedCeilingMeshCount: ceilingMeshes.length,
             detailedNearbyDoorMeshCount: nearbyDoorMeshes.length,
+            detailedNearbyWindowMeshCount: nearbyWindowMeshes.length,
             detailedStairMeshCount: stairMeshes.length,
             detailedDeviceMeshCount: deviceMeshes.length,
         }

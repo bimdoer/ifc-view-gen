@@ -11,8 +11,15 @@
  *
  * Ausführen (im Projektroot):
  *   npm run test:plan-door-visibility
+ * (`test-plan-door-visibility-runner.js` filtert `[WEB-IFC]`-Zeilen auf stdout/stderr vor web-ifc.)
+ * Eine oder mehrere Türen ohne `doorGuids`/`doorGuidsFile` anzupassen:
+ *   npm run test:plan-door-visibility -- --door-guid=3rHbqOORWCHPowI54bM3Tw
+ *   npm run test:plan-door-visibility -- --door-guid 3rHbqOORWCHPowI54bM3Tw,1zuJJ43NYeI8ePdVq268DL
+ * Das **erste `--`** ist nötig: sonst interpretiert npm `--door-guid` als npm-Config („Unknown cli config“).
+ * Ohne `--`: Umgebungsvariable `PLAN_DOOR_GUID` (oder `DOOR_GUID`), z. B. PowerShell
+ *   `$env:PLAN_DOOR_GUID='3rHbqOORWCHPowI54bM3Tw'; npm run test:plan-door-visibility`
  * Alternativ:
- *   node scripts/test-plan-door-visibility-runner.js
+ *   node scripts/test-plan-door-visibility-runner.js -- --door-guid=…
  *
  * Erzeugte Grundriss-SVGs: nur bei gesetztem IFC → `test-output/plan-door-visibility/<guid>-plan.svg`
  */
@@ -22,11 +29,7 @@ import { basename, resolve } from 'node:path'
 import * as THREE from 'three'
 import { analyzeDoors, loadDetailedGeometry, type DoorContext } from '../lib/door-analyzer'
 import type { ElementInfo, LoadedIFCModel } from '../lib/ifc-types'
-import {
-    extractDoorCsetStandardCH,
-    extractDoorOperationTypes,
-    loadIFCModelWithMetadata,
-} from '../lib/ifc-loader'
+import { extractDoorAnalyzerSidecarMaps, loadIFCModelWithMetadata } from '../lib/ifc-loader'
 import { renderDoorPlanSVG, type SVGRenderOptions } from '../lib/svg-renderer'
 
 const PLAN_SVG_OUTPUT_DIR = resolve(process.cwd(), 'test-output', 'plan-door-visibility')
@@ -82,10 +85,12 @@ const USER_PLAN_VISIBILITY_CONFIG = {
     architectureIfc: resolve(process.cwd(), 'scripts', 'Flu21_A_AR_51_ARM_0000_A-AR-0000-0001_260421.ifc'),
     electricalIfc: resolve(process.cwd(), 'scripts', 'Flu21_A_EL_51_ELM_0000_A-EL-2300-0001_IFC Elektro.ifc'),
 
-    // doorGuids: [],
-    doorGuids: ['3rHkFkTPPyIhdsnM91YiTi', '1zuJJ43NYeI8ePdVq268DL', '3sP2fkpffiGAfzCmMDRKwJ', '03X27dQWY$GOWvC6E9H2iM', '2AZzgHjcdaHO3Mhd2SAf27', '3rHbqOORWCHPowI54bM3Tw', '3aVa2FUC3MGh_moACqukn5', '3I5ctHuht6Jf1kJas7307o', '17XU7kP97zGxRVilNdTZNE', '2oJ4EKhLSWJQT42l1iRIJ5', '1B_mJRygmNJe994AyR$r0Z', '145bDa1tR7GQdZeomJSxmY', '3P$pruKB0RGfzosAhci2fs', '1dar7_TIC5JA4pf8N1G4mH', '0M_OznmjBSIBte_jOekPs2', '2KzzpHCrHFH8ooxtESAPCp', '1zuJJ43NYeI8ePdVq268DL'],
+    doorGuids: [],
 
+    /** Einzeltür testen: z. B. `doorGuids: ['1deFxoCcbbI816DRLMaWcI']` + `doorGuidsFile: null` */
+    // doorGuids: ['1deFxoCcbbI816DRLMaWcI'],
     // doorGuidsFile: null,
+
     doorGuidsFile: resolve(process.cwd(), 'scripts', 'guid.json'),
     /**
      * Bei gesetztem Arch-IFC + GUIDs: `true` = synthetischen In-Memory-Test überspringen,
@@ -205,9 +210,11 @@ async function buildSyntheticDoorWallContext(): Promise<DoorContext> {
         doorMeshes: [doorMesh],
         wallMeshes,
         nearbyWallMeshes: [],
+        wallAggregatePartMeshes: [],
         slabMeshes: [],
         ceilingMeshes: [],
         nearbyDoorMeshes: [],
+        nearbyWindowMeshes: [],
         stairMeshes: [],
         deviceMeshes: [],
     }
@@ -274,7 +281,7 @@ function overlapsHorizontally(a: BBox2D, b: BBox2D, eps = 0): boolean {
     return Math.min(a.maxX, b.maxX) > Math.max(a.minX, b.minX) - eps
 }
 
-/** Content of `<g id="...">` balancing nested groups (same idea as test-zgso-real-ifc-regression). */
+/** Content of `<g id="...">` balancing nested groups (same idea as test-file-real-ifc-regression). */
 function extractGroupContent(svg: string, groupId: string): string {
     const startTag = `<g id="${groupId}">`
     const startIndex = svg.indexOf(startTag)
@@ -413,13 +420,55 @@ function maybePrintHelp(argv: string[]): void {
 
   npm run test:plan-door-visibility
 
-IFC-Pfade und Tür-GUIDs: USER_PLAN_VISIBILITY_CONFIG in dieser Datei.
-Optional doorGuidsFile: Zeilen mit IfcDoor GlobalId (z. B. scripts/guid.json), mit doorGuids zusammengeführt.
+  npm run test:plan-door-visibility -- --door-guid=<IfcDoor GlobalId>
+  npm run test:plan-door-visibility -- --door-guid <id>[,<id>…]   (Komma/Semikolon in einem Token)
+  (Das „--“ vor --door-guid ist Pflicht bei npm run — sonst: Unknown cli config.)
+
+  Ohne Script-Argumente: PLAN_DOOR_GUID oder DOOR_GUID setzen (Komma/Semikolon für mehrere).
+
+IFC-Pfade: USER_PLAN_VISIBILITY_CONFIG in dieser Datei.
+Tür-GUIDs: wie oben, oder doorGuids + optional doorGuidsFile in der Datei (wird ignoriert, wenn Override gesetzt ist).
 strictDoorGuids: false = fehlende GUIDs überspringen, alle im IFC gefundenen Türen rendern.
-useAllIfcDoors: true = alle IfcDoor des Arch-IFC rendern (ohne GUID-Liste).
-Mit Arch-IFC + GUIDs: nur echte Grundriss-SVGs → test-output/plan-door-visibility/
+useAllIfcDoors: true = alle IfcDoor des Arch-IFC rendern (wird ignoriert, wenn door-guid-Override gesetzt ist).
+Mit Arch-IFC + GUIDs: echte Grundriss-SVGs → test-output/plan-door-visibility/
 Ohne IFC: nur kurzer In-Memory-Synthetiktest (keine SVG-Datei).`)
     process.exit(0)
+}
+
+/** If non-empty, replaces merged doorGuids + doorGuidsFile for this run only. */
+function parseCliDoorGuidOverrides(argv: string[]): string[] | null {
+    const out: string[] = []
+    for (let i = 0; i < argv.length; i++) {
+        const a = argv[i]
+        if (a.startsWith('--door-guid=')) {
+            const rest = a.slice('--door-guid='.length)
+            out.push(
+                ...rest
+                    .split(/[,;]/g)
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+            )
+            continue
+        }
+        if (a === '--door-guid' && i + 1 < argv.length) {
+            out.push(
+                ...argv[i + 1]
+                    .split(/[,;]/g)
+                    .map((s) => s.trim())
+                    .filter(Boolean),
+            )
+            i++
+        }
+    }
+    return out.length > 0 ? out : null
+}
+
+/** Same as CLI `--door-guid`, via env so `npm run …` needs no `--` (avoids npm swallowing flags). */
+function parseEnvDoorGuidOverrides(): string[] | null {
+    const raw = process.env.PLAN_DOOR_GUID?.trim() || process.env.DOOR_GUID?.trim()
+    if (!raw) return null
+    const ids = raw.split(/[,;]/g).map((s) => s.trim()).filter(Boolean)
+    return ids.length > 0 ? ids : null
 }
 
 function loadIfcFile(filePath: string): File {
@@ -482,9 +531,6 @@ function resolveDoorGuidList(
             )
         }
     }
-    console.log(
-        `[plan-door-visibility] GUIDs nach Merge/Dedupe: ${out.length} (Array-Einträge: ${fromArray.length}, Datei-Zeilen: ${fromFile.length})`
-    )
 
     return out
 }
@@ -548,29 +594,22 @@ async function runIfcCasesForGuids(
     const primaryModel = await loadIFCModelWithMetadata(archFile)
     const secondaryModel = elecFile ? await loadIFCModelWithMetadata(elecFile) : undefined
 
-    const operationTypeMap = await extractDoorOperationTypes(archFile)
-    const csetStandardCHMap = await extractDoorCsetStandardCH(archFile)
+    const { operationTypeMap, csetStandardCHMap, wallAggregatePartMap } = await extractDoorAnalyzerSidecarMaps(archFile)
     const contexts = await analyzeDoors(
         primaryModel,
         secondaryModel,
         undefined,
         operationTypeMap,
-        csetStandardCHMap
+        csetStandardCHMap,
+        undefined,
+        undefined,
+        undefined,
+        wallAggregatePartMap
     )
 
     const normalizedGuids = useAllIfcDoors
         ? contexts.map((c) => c.doorId)
         : guids.map((g) => g.trim()).filter(Boolean)
-
-    if (useAllIfcDoors) {
-        console.log(
-            `[plan-door-visibility] useAllIfcDoors: ${normalizedGuids.length} IfcDoor(s) im Arch-IFC — Auswahl aus doorGuids/Datei wird ignoriert.`
-        )
-    } else {
-        console.log(
-            `[plan-door-visibility] Anfrage: ${normalizedGuids.length} GUID(s), IfcDoor-Kontexte im Modell: ${contexts.length}.`
-        )
-    }
 
     const missing = useAllIfcDoors
         ? []
@@ -607,8 +646,6 @@ async function runIfcCasesForGuids(
         .map((g) => contexts.find((c) => c.doorId === g)!)
         .filter(Boolean)
 
-    console.log(`[plan-door-visibility] Rendere ${selected.length} Grundriss-SVG(s).`)
-
     await loadDetailedGeometry(selected, archFile, new THREE.Vector3(0, 0, 0), elecFile)
 
     const options = defaultRenderOptions()
@@ -643,16 +680,25 @@ async function runIfcCasesForGuids(
 }
 
 async function main(): Promise<void> {
-    maybePrintHelp(process.argv.slice(2))
+    const argv = process.argv.slice(2)
+    maybePrintHelp(argv)
 
     const archPath = resolveConfigPath(USER_PLAN_VISIBILITY_CONFIG.architectureIfc)
     const elecPath = resolveConfigPath(USER_PLAN_VISIBILITY_CONFIG.electricalIfc)
-    const guidList = resolveDoorGuidList(
-        USER_PLAN_VISIBILITY_CONFIG.doorGuids,
-        USER_PLAN_VISIBILITY_CONFIG.doorGuidsFile
-    )
+    const cliDoorGuidsFromArgv = parseCliDoorGuidOverrides(argv)
+    const doorGuidOverride = cliDoorGuidsFromArgv ?? parseEnvDoorGuidOverrides()
+    const guidList =
+        doorGuidOverride !== null
+            ? doorGuidOverride
+            : resolveDoorGuidList(USER_PLAN_VISIBILITY_CONFIG.doorGuids, USER_PLAN_VISIBILITY_CONFIG.doorGuidsFile)
 
-    const useAllIfcDoors = USER_PLAN_VISIBILITY_CONFIG.useAllIfcDoors === true
+    if (doorGuidOverride !== null) {
+        const src = cliDoorGuidsFromArgv !== null ? 'CLI --door-guid' : 'PLAN_DOOR_GUID / DOOR_GUID'
+        console.log(`[plan-door-visibility] Using ${src} (${guidList.length}): ${guidList.join(', ')}`)
+    }
+
+    const useAllIfcDoors =
+        USER_PLAN_VISIBILITY_CONFIG.useAllIfcDoors === true && doorGuidOverride === null
     const hasArch = Boolean(archPath)
     const hasGuids = guidList.length > 0 || useAllIfcDoors
     const ifcConfigured = hasArch && hasGuids

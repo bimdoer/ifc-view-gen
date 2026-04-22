@@ -166,9 +166,11 @@ async function buildContext(options?: {
         doorMeshes: [doorMesh],
         wallMeshes: includeWall ? [wallMesh] : [],
         nearbyWallMeshes: [],
+        wallAggregatePartMeshes: [],
         slabMeshes: [],
         ceilingMeshes: includeCeiling ? [ceilingMesh] : [],
         nearbyDoorMeshes: [],
+        nearbyWindowMeshes: [],
         stairMeshes: includeStair ? [stairMesh] : [],
         deviceMeshes: [deviceMesh],
     }
@@ -316,15 +318,16 @@ function assertCoordinatesWithinBounds(svg: string, width: number, height: numbe
     }
 }
 
-function getLongestDashedGuide(svg: string): { x1: number; y1: number; x2: number; y2: number } | null {
+/** Longest solid plan swing “open position” guide: same stroke as arc helper, no dash (product is solid, not dashed). */
+function getLongestSwingOpenGuide(svg: string): { x1: number; y1: number; x2: number; y2: number } | null {
     const lineMatches = svg.match(/<line\b[^>]*>/g) || []
     let bestLine: { x1: number; y1: number; x2: number; y2: number } | null = null
     let bestLength = -Infinity
 
     for (const lineTag of lineMatches) {
         const stroke = lineTag.match(/\bstroke="([^"]+)"/)?.[1]
-        const dash = lineTag.match(/\bstroke-dasharray="([^"]+)"/)?.[1]
-        if (stroke !== '#666666' || dash !== '4,2') continue
+        if (stroke !== '#666666') continue
+        if (/\bstroke-dasharray=/.test(lineTag)) continue
 
         const x1 = Number.parseFloat(lineTag.match(/\bx1="([^"]+)"/)?.[1] || 'NaN')
         const y1 = Number.parseFloat(lineTag.match(/\by1="([^"]+)"/)?.[1] || 'NaN')
@@ -383,9 +386,11 @@ async function buildLCornerContext(): Promise<DoorContext> {
         doorMeshes: [doorMesh],
         wallMeshes: [hostWallMesh],
         nearbyWallMeshes: [perpWallMesh],
+        wallAggregatePartMeshes: [],
         slabMeshes: [],
         ceilingMeshes: [],
         nearbyDoorMeshes: [],
+        nearbyWindowMeshes: [],
         stairMeshes: [],
         deviceMeshes: [],
     }
@@ -439,9 +444,11 @@ async function buildAdjacentDoorsContexts(): Promise<{ primary: DoorContext; sec
             doorMeshes: [ownMesh],
             wallMeshes: [hostWallMesh],
             nearbyWallMeshes: [],
+            wallAggregatePartMeshes: [],
             slabMeshes: [],
             ceilingMeshes: [],
             nearbyDoorMeshes: [],
+            nearbyWindowMeshes: [],
             stairMeshes: [],
             deviceMeshes: [],
         }
@@ -675,20 +682,20 @@ async function main() {
     const sideFixedLeftPlan = sideFixedLeftViews.plan
     const sideFixedRightPlan = sideFixedRightViews.plan
 
-    const leftGuide  = getLongestDashedGuide(leftPlan)
-    const rightGuide = getLongestDashedGuide(rightPlan)
-    const rotatedGuide = getLongestDashedGuide(rot45Plan)
-    const upwardGuide = getLongestDashedGuide(upwardArcPlan)
-    const sideFixedLeftGuide = getLongestDashedGuide(sideFixedLeftPlan)
-    const sideFixedRightGuide = getLongestDashedGuide(sideFixedRightPlan)
+    const leftGuide  = getLongestSwingOpenGuide(leftPlan)
+    const rightGuide = getLongestSwingOpenGuide(rightPlan)
+    const rotatedGuide = getLongestSwingOpenGuide(rot45Plan)
+    const upwardGuide = getLongestSwingOpenGuide(upwardArcPlan)
+    const sideFixedLeftGuide = getLongestSwingOpenGuide(sideFixedLeftPlan)
+    const sideFixedRightGuide = getLongestSwingOpenGuide(sideFixedRightPlan)
     const planBounds = getRenderedContentBounds(leftPlan)
 
-    assert.ok(leftGuide,  'Left swing plan should include a dashed open-position guide')
-    assert.ok(rightGuide, 'Right swing plan should include a dashed open-position guide')
+    assert.ok(leftGuide,  'Left swing plan should include a solid open-position guide')
+    assert.ok(rightGuide, 'Right swing plan should include a solid open-position guide')
     assert.equal(rotatedGuide, null, 'Rotated plan should not render a symbolic swing guide')
-    assert.ok(upwardGuide, 'IFC-reversed placement should still include a dashed open-position guide')
-    assert.ok(sideFixedLeftGuide, 'Fixed-left sidelight plan should include a dashed open-position guide')
-    assert.ok(sideFixedRightGuide, 'Fixed-right sidelight plan should include a dashed open-position guide')
+    assert.ok(upwardGuide, 'IFC-reversed placement should still include a solid open-position guide')
+    assert.ok(sideFixedLeftGuide, 'Fixed-left sidelight plan should include a solid open-position guide')
+    assert.ok(sideFixedRightGuide, 'Fixed-right sidelight plan should include a solid open-position guide')
     assert.ok(planBounds, 'Plan view should contain rendered geometry')
     assert.ok(planBounds.maxX - planBounds.minX > 250, 'Plan view geometry should occupy a substantial width')
     // Plan uses the same scale as Vorderansicht (renderDoorViews); the slice is shallow in screen Y.
@@ -705,14 +712,14 @@ async function main() {
     // `widthAxis` depends on `semanticFacing`, which can be guessed with either
     // sign; the mirror logic compensates so that IFC LEFT/RIGHT always maps to
     // the correct world-side regardless of that ambiguity.
-    const handednessLeftPlusZGuide   = getLongestDashedGuide(handednessLeftPlusZViews.plan)
-    const handednessLeftMinusZGuide  = getLongestDashedGuide(handednessLeftMinusZViews.plan)
-    const handednessRightPlusZGuide  = getLongestDashedGuide(handednessRightPlusZViews.plan)
-    const handednessRightMinusZGuide = getLongestDashedGuide(handednessRightMinusZViews.plan)
-    assert.ok(handednessLeftPlusZGuide,   'SINGLE_SWING_LEFT with placementYAxis=+Z should render a swing guide')
-    assert.ok(handednessLeftMinusZGuide,  'SINGLE_SWING_LEFT with placementYAxis=-Z should render a swing guide')
-    assert.ok(handednessRightPlusZGuide,  'SINGLE_SWING_RIGHT with placementYAxis=+Z should render a swing guide')
-    assert.ok(handednessRightMinusZGuide, 'SINGLE_SWING_RIGHT with placementYAxis=-Z should render a swing guide')
+    const handednessLeftPlusZGuide   = getLongestSwingOpenGuide(handednessLeftPlusZViews.plan)
+    const handednessLeftMinusZGuide  = getLongestSwingOpenGuide(handednessLeftMinusZViews.plan)
+    const handednessRightPlusZGuide  = getLongestSwingOpenGuide(handednessRightPlusZViews.plan)
+    const handednessRightMinusZGuide = getLongestSwingOpenGuide(handednessRightMinusZViews.plan)
+    assert.ok(handednessLeftPlusZGuide,   'SINGLE_SWING_LEFT with placementYAxis=+Z should render a solid open-position guide')
+    assert.ok(handednessLeftMinusZGuide,  'SINGLE_SWING_LEFT with placementYAxis=-Z should render a solid open-position guide')
+    assert.ok(handednessRightPlusZGuide,  'SINGLE_SWING_RIGHT with placementYAxis=+Z should render a solid open-position guide')
+    assert.ok(handednessRightMinusZGuide, 'SINGLE_SWING_RIGHT with placementYAxis=-Z should render a solid open-position guide')
     const midX = options.width! / 2
     const leftPlusZOnLeft   = handednessLeftPlusZGuide.x1   < midX
     const leftMinusZOnLeft  = handednessLeftMinusZGuide.x1  < midX
@@ -741,8 +748,8 @@ async function main() {
     )
     // Double doors (hingeSide='both') must still render a symbolic swing; hinge mirroring
     // is a no-op for symmetric leaves but the renderer must not crash or drop the swing.
-    const handednessDoubleDoorGuide = getLongestDashedGuide(handednessDoubleDoorViews.plan)
-    assert.ok(handednessDoubleDoorGuide, 'DOUBLE_DOOR_SINGLE_SWING with placementYAxis=+Z should still render a swing guide')
+    const handednessDoubleDoorGuide = getLongestSwingOpenGuide(handednessDoubleDoorViews.plan)
+    assert.ok(handednessDoubleDoorGuide, 'DOUBLE_DOOR_SINGLE_SWING with placementYAxis=+Z should still render a solid open-position guide')
 
     // Default synthetic setup opens downward: y2 > y1.
     assert.ok(leftGuide.y2  > leftGuide.y1,  'Left swing arc should open downward (into room)')
@@ -791,10 +798,10 @@ async function main() {
     }
 
     // The old plan tests (legacy)
-    const leftGuide2  = getLongestDashedGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_LEFT'  }), options)).plan)
-    const rightGuide2 = getLongestDashedGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_RIGHT' }), options)).plan)
-    assert.ok(leftGuide2,  'No-wall left swing plan should include a dashed guide')
-    assert.ok(rightGuide2, 'No-wall right swing plan should include a dashed guide')
+    const leftGuide2  = getLongestSwingOpenGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_LEFT'  }), options)).plan)
+    const rightGuide2 = getLongestSwingOpenGuide((await renderDoorViews(await buildContext({ includeWall: false, openingDirection: 'SINGLE_SWING_RIGHT' }), options)).plan)
+    assert.ok(leftGuide2,  'No-wall left swing plan should include a solid open-position guide')
+    assert.ok(rightGuide2, 'No-wall right swing plan should include a solid open-position guide')
 
     const thickWallContext = await buildContext({ includeWall: true, wallThickness: 0.6 })
     const thickWallViews = await renderDoorViews(thickWallContext, options)

@@ -136,74 +136,75 @@ export async function extractDoorTypes(file: File): Promise<Map<number, string>>
 }
 
 /**
+ * Extract door OperationType from an already-open web-ifc model.
+ * One pass over IfcRelDefinesByType (not per door) for speed on large models.
+ */
+function extractDoorOperationTypesFromOpenModel(api: IfcAPI, modelID: number): Map<number, string> {
+    const operationTypeMap = new Map<number, string>()
+    const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
+    const doorSet = new Set<number>()
+    for (let i = 0; i < doorIds.size(); i++) {
+        doorSet.add(doorIds.get(i))
+    }
+
+    const doorToTypeId = new Map<number, number>()
+    const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+    for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
+        const rel = api.GetLine(modelID, relDefinesByTypeIds.get(i))
+        if (!rel) continue
+        const typeId = rel.RelatingType?.value
+        if (typeof typeId !== 'number') continue
+        for (const obj of normalizeIfcRelationshipRelatedObjects(rel)) {
+            const oid = obj?.value
+            if (typeof oid === 'number' && doorSet.has(oid)) {
+                doorToTypeId.set(oid, typeId)
+            }
+        }
+    }
+
+    for (let i = 0; i < doorIds.size(); i++) {
+        const doorId = doorIds.get(i)
+        const door = api.GetLine(modelID, doorId)
+        if (!door) continue
+
+        let operationType: string | null = null
+        if (door.OperationType && door.OperationType.value && door.OperationType.value !== 'NOTDEFINED') {
+            operationType = door.OperationType.value
+        }
+
+        if (!operationType) {
+            const typeId = doorToTypeId.get(doorId)
+            if (typeof typeId === 'number') {
+                const typeEntity = api.GetLine(modelID, typeId)
+                if (typeEntity?.OperationType && typeEntity.OperationType.value && typeEntity.OperationType.value !== 'NOTDEFINED') {
+                    operationType = typeEntity.OperationType.value
+                }
+            }
+        }
+
+        if (operationType) {
+            operationTypeMap.set(doorId, operationType)
+        }
+    }
+
+    return operationTypeMap
+}
+
+/**
  * Extract door OperationType from IFC file using web-ifc
  * Returns a map of door expressID -> OperationType value
  */
 export async function extractDoorOperationTypes(file: File): Promise<Map<number, string>> {
     const api = await initializeIFCAPI()
-    const operationTypeMap = new Map<number, string>()
-
-    // Read file as ArrayBuffer
     const arrayBuffer = await file.arrayBuffer()
     const data = new Uint8Array(arrayBuffer)
-
-    // Open the IFC model
     const modelID = api.OpenModel(data)
     if (modelID === -1) {
         console.error('Failed to open IFC model for OperationType extraction')
-        return operationTypeMap
+        return new Map()
     }
-
     try {
-        // Get all door instances
-        const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
-
-        for (let i = 0; i < doorIds.size(); i++) {
-            const doorId = doorIds.get(i)
-            const door = api.GetLine(modelID, doorId)
-
-            if (!door) continue
-
-            // Check instance OperationType first
-            let operationType: string | null = null
-            if (door.OperationType && door.OperationType.value && door.OperationType.value !== 'NOTDEFINED') {
-                operationType = door.OperationType.value
-            }
-
-            // If not found on instance, check type via IfcRelDefinesByType
-            if (!operationType) {
-                const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
-
-                for (let j = 0; j < relDefinesByTypeIds.size(); j++) {
-                    const relId = relDefinesByTypeIds.get(j)
-                    const rel = api.GetLine(modelID, relId)
-
-                    if (!rel || !rel.RelatedObjects) continue
-
-                    const relatedObjects = Array.isArray(rel.RelatedObjects) ? rel.RelatedObjects : [rel.RelatedObjects]
-                    const isRelated = relatedObjects.some((obj: any) => obj?.value === doorId)
-
-                    if (isRelated) {
-                        // Found the type relation for this door
-                        const typeId = rel.RelatingType?.value
-                        if (typeId) {
-                            const typeEntity = api.GetLine(modelID, typeId)
-                            if (typeEntity?.OperationType && typeEntity.OperationType.value && typeEntity.OperationType.value !== 'NOTDEFINED') {
-                                operationType = typeEntity.OperationType.value
-                                break
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (operationType) {
-                operationTypeMap.set(doorId, operationType)
-            }
-        }
-
-
-        return operationTypeMap
+        return extractDoorOperationTypesFromOpenModel(api, modelID)
     } finally {
         api.CloseModel(modelID)
     }
@@ -264,6 +265,25 @@ export async function extractDoorHostRelationships(file: File): Promise<Map<numb
     }
 }
 
+/** web-ifc may return ref lists as an array, a single ref, or a Vector with .get/.size */
+function normalizeIfcRefAttribute(value: unknown): { value?: number }[] {
+    if (value == null) return []
+    if (Array.isArray(value)) return value as { value?: number }[]
+    if (typeof (value as { size?: number }).size === 'number' && typeof (value as { get?: (i: number) => unknown }).get === 'function') {
+        const v = value as { size: number; get: (i: number) => { value?: number } }
+        const out: { value?: number }[] = []
+        for (let i = 0; i < v.size; i++) {
+            out.push(v.get(i))
+        }
+        return out
+    }
+    return [value as { value?: number }]
+}
+
+function normalizeIfcRelationshipRelatedObjects(rel: { RelatedObjects?: unknown }): { value?: number }[] {
+    return normalizeIfcRefAttribute(rel?.RelatedObjects)
+}
+
 /**
  * Extract a child element -> parent slab map for aggregated slab geometry carriers.
  * Some authored slabs (e.g. floor build-ups / Unterlagsboden) have no own representation
@@ -298,7 +318,7 @@ export async function extractSlabAggregateParts(file: File): Promise<Map<number,
         for (let i = 0; i < relAggregateIds.size(); i++) {
             const rel = api.GetLine(modelID, relAggregateIds.get(i))
             const parentId = rel?.RelatingObject?.value
-            const children = Array.isArray(rel?.RelatedObjects) ? rel.RelatedObjects : []
+            const children = normalizeIfcRelationshipRelatedObjects(rel)
             if (typeof parentId !== 'number' || children.length === 0) continue
 
             const parent = api.GetLine(modelID, parentId)
@@ -316,6 +336,198 @@ export async function extractSlabAggregateParts(file: File): Promise<Map<number,
         }
 
         return result
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+/**
+ * Map IfcBuildingElementPart expressID → parent wall (IfcWall / IfcWallStandardCase / IfcCurtainWall)
+ * for layered façades / insulation / concrete skins aggregated under the wall.
+ *
+ * Handles IfcRelAggregates + IfcRelNests, normalizes RelatedObjects (array / single / Vector),
+ * and resolves IfcElementAssembly chains under the wall.
+ */
+function extractWallAggregatePartsFromOpenModel(api: IfcAPI, modelID: number): Map<number, number> {
+    const result = new Map<number, number>()
+    const relAggregatesType = (WebIFC as any).IFCRELAGGREGATES
+    const relNestsType = (WebIFC as any).IFCRELNESTS
+    const ifcWallType = (WebIFC as any).IFCWALL
+    const ifcWallStandardCaseType = (WebIFC as any).IFCWALLSTANDARDCASE
+    const ifcCurtainWallType = (WebIFC as any).IFCCURTAINWALL
+    const ifcBuildingElementPartType = (WebIFC as any).IFCBUILDINGELEMENTPART
+    const ifcElementAssemblyType = (WebIFC as any).IFCELEMENTASSEMBLY
+    if (
+        typeof relAggregatesType !== 'number'
+        || typeof ifcWallType !== 'number'
+        || typeof ifcWallStandardCaseType !== 'number'
+        || typeof ifcBuildingElementPartType !== 'number'
+    ) {
+        return result
+    }
+
+    const isWallType = (pt: number) =>
+        pt === ifcWallType
+        || pt === ifcWallStandardCaseType
+        || (typeof ifcCurtainWallType === 'number' && pt === ifcCurtainWallType)
+
+    const isRelAggregatesOrNests = (relType: number) =>
+        relType === relAggregatesType
+        || (typeof relNestsType === 'number' && relType === relNestsType)
+
+    type StructureRow = { parentId: number; children: { value?: number }[] }
+    const relAggRows: StructureRow[] = []
+    const relNestRows: StructureRow[] = []
+
+    const relAggregateIds = api.GetLineIDsWithType(modelID, relAggregatesType)
+    for (let i = 0; i < relAggregateIds.size(); i++) {
+        const rel = api.GetLine(modelID, relAggregateIds.get(i))
+        const parentId = rel?.RelatingObject?.value
+        if (typeof parentId !== 'number') continue
+        const children = normalizeIfcRelationshipRelatedObjects(rel)
+        if (children.length === 0) continue
+        relAggRows.push({ parentId, children })
+    }
+
+    if (typeof relNestsType === 'number') {
+        const nestIds = api.GetLineIDsWithType(modelID, relNestsType)
+        for (let i = 0; i < nestIds.size(); i++) {
+            const rel = api.GetLine(modelID, nestIds.get(i))
+            const parentId = rel?.RelatingObject?.value
+            if (typeof parentId !== 'number') continue
+            const children = normalizeIfcRelationshipRelatedObjects(rel)
+            if (children.length === 0) continue
+            relNestRows.push({ parentId, children })
+        }
+    }
+
+    const assemblyToWall = new Map<number, number>()
+
+    const linkWallDirectChildren = (rows: StructureRow[]) => {
+        for (const { parentId, children } of rows) {
+            const parent = api.GetLine(modelID, parentId)
+            const pt = parent?.type
+            if (!isWallType(pt ?? -1)) continue
+            for (const childRef of children) {
+                const childId = childRef?.value
+                if (typeof childId !== 'number') continue
+                const child = api.GetLine(modelID, childId)
+                if (!child) continue
+                if (child.type === ifcBuildingElementPartType) {
+                    result.set(childId, parentId)
+                } else if (typeof ifcElementAssemblyType === 'number' && child.type === ifcElementAssemblyType) {
+                    assemblyToWall.set(childId, parentId)
+                }
+            }
+        }
+    }
+
+    linkWallDirectChildren(relAggRows)
+    linkWallDirectChildren(relNestRows)
+
+    const allStructureRows = [...relAggRows, ...relNestRows]
+
+    let changed = true
+    while (changed) {
+        changed = false
+        for (const { parentId, children } of allStructureRows) {
+            const wallId = assemblyToWall.get(parentId)
+            if (typeof wallId !== 'number') continue
+            for (const childRef of children) {
+                const childId = childRef?.value
+                if (typeof childId !== 'number') continue
+                const child = api.GetLine(modelID, childId)
+                if (!child) continue
+                if (typeof ifcElementAssemblyType === 'number' && child.type === ifcElementAssemblyType) {
+                    if (!assemblyToWall.has(childId)) {
+                        assemblyToWall.set(childId, wallId)
+                        changed = true
+                    }
+                }
+            }
+        }
+    }
+
+    for (const { parentId, children } of allStructureRows) {
+        const wallId = assemblyToWall.get(parentId)
+        if (typeof wallId !== 'number') continue
+        for (const childRef of children) {
+            const childId = childRef?.value
+            if (typeof childId !== 'number') continue
+            const child = api.GetLine(modelID, childId)
+            if (child?.type === ifcBuildingElementPartType) {
+                result.set(childId, wallId)
+            }
+        }
+    }
+
+    /** Parts use inverse `Decomposes` → IfcRelAggregates / IfcRelNests (not always discoverable from wall→children only). */
+    const resolveWallFromAggregatedParent = (startId: number): number | null => {
+        const visited = new Set<number>()
+        const walk = (id: number, depth: number): number | null => {
+            if (depth > 40 || visited.has(id)) return null
+            visited.add(id)
+            const el = api.GetLine(modelID, id, false, false)
+            if (!el) return null
+            if (isWallType(el.type)) return id
+            const wallViaAsm = assemblyToWall.get(id)
+            if (typeof wallViaAsm === 'number') return wallViaAsm
+            const inv = api.GetLine(modelID, id, false, true) as { Decomposes?: unknown }
+            for (const relRef of normalizeIfcRefAttribute(inv?.Decomposes)) {
+                const relId = relRef?.value
+                if (typeof relId !== 'number') continue
+                const rel = api.GetLine(modelID, relId, false, false)
+                if (!rel) continue
+                if (!isRelAggregatesOrNests(rel.type)) continue
+                const parentIdWalk = rel.RelatingObject?.value
+                if (typeof parentIdWalk !== 'number') continue
+                const hit = walk(parentIdWalk, depth + 1)
+                if (typeof hit === 'number') return hit
+            }
+            return null
+        }
+        return walk(startId, 0)
+    }
+
+    const partIdsAll = api.GetLineIDsWithType(modelID, ifcBuildingElementPartType)
+    for (let i = 0; i < partIdsAll.size(); i++) {
+        const partId = partIdsAll.get(i)
+        if (result.has(partId)) continue
+        const partInv = api.GetLine(modelID, partId, false, true) as { Decomposes?: unknown }
+        for (const relRef of normalizeIfcRefAttribute(partInv?.Decomposes)) {
+            const relId = relRef?.value
+            if (typeof relId !== 'number') continue
+            const rel = api.GetLine(modelID, relId, false, false)
+            if (!rel) continue
+            if (!isRelAggregatesOrNests(rel.type)) continue
+            const parentIdPart = rel.RelatingObject?.value
+            if (typeof parentIdPart !== 'number') continue
+            const wallRoot = resolveWallFromAggregatedParent(parentIdPart)
+            if (typeof wallRoot === 'number') {
+                result.set(partId, wallRoot)
+                break
+            }
+        }
+    }
+
+    return result
+}
+
+/**
+ * Map IfcBuildingElementPart expressID → parent wall (IfcWall / IfcWallStandardCase / IfcCurtainWall).
+ * Opens the IFC once per call; prefer {@link extractDoorAnalyzerSidecarMaps} when you also need operation types / Cset.
+ */
+export async function extractWallAggregateParts(file: File): Promise<Map<number, number>> {
+    const api = await initializeIFCAPI()
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for wall aggregate extraction')
+        return new Map()
+    }
+    try {
+        return extractWallAggregatePartsFromOpenModel(api, modelID)
     } finally {
         api.CloseModel(modelID)
     }
@@ -628,93 +840,123 @@ function applyCsetProperty(target: DoorCsetStandardCHData, propName: string, nom
     }
 }
 
+function extractDoorCsetStandardCHFromOpenModel(api: IfcAPI, modelID: number): Map<number, DoorCsetStandardCHData> {
+    const result = new Map<number, DoorCsetStandardCHData>()
+    const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
+    const doorSet = new Set<number>()
+    for (let i = 0; i < doorIds.size(); i++) {
+        doorSet.add(doorIds.get(i))
+    }
+
+    const typeToDoors = new Map<number, number[]>()
+    const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
+    for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
+        const rel = api.GetLine(modelID, relDefinesByTypeIds.get(i))
+        const typeId = rel?.RelatingType?.value
+        if (typeof typeId !== 'number') continue
+        for (const obj of normalizeIfcRelationshipRelatedObjects(rel)) {
+            const doorId = obj?.value
+            if (typeof doorId !== 'number' || !doorSet.has(doorId)) continue
+            const arr = typeToDoors.get(typeId) || []
+            arr.push(doorId)
+            typeToDoors.set(typeId, arr)
+        }
+    }
+
+    const relDefinesByPropsIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES)
+    for (let i = 0; i < relDefinesByPropsIds.size(); i++) {
+        const rel = api.GetLine(modelID, relDefinesByPropsIds.get(i))
+        const relatingPropDefId = rel?.RelatingPropertyDefinition?.value
+        if (typeof relatingPropDefId !== 'number') continue
+
+        const pset = api.GetLine(modelID, relatingPropDefId)
+        const psetName = String(unwrapIfcValue(pset?.Name) || '')
+        const normalizedPsetName = normalizeIfcName(psetName)
+        const isRelevantPset =
+            normalizedPsetName === 'csetstandardch'
+            || normalizedPsetName === 'psetdoorcommon'
+            || normalizedPsetName.startsWith('al00')
+            || normalizedPsetName.startsWith('in01')
+        if (!isRelevantPset) continue
+
+        const hasProperties = normalizeIfcRefAttribute(pset?.HasProperties)
+        const targetDoorIds = new Set<number>()
+        for (const obj of normalizeIfcRelationshipRelatedObjects(rel)) {
+            const objId = obj?.value
+            if (typeof objId !== 'number') continue
+            if (doorSet.has(objId)) {
+                targetDoorIds.add(objId)
+            } else {
+                const doorsForType = typeToDoors.get(objId)
+                if (doorsForType) doorsForType.forEach((id) => targetDoorIds.add(id))
+            }
+        }
+
+        if (targetDoorIds.size === 0) continue
+
+        for (const doorId of targetDoorIds) {
+            const existing = result.get(doorId) || emptyDoorCsetStandardCHData()
+            for (const propRef of hasProperties) {
+                const propId = propRef?.value
+                if (typeof propId !== 'number') continue
+                const prop = api.GetLine(modelID, propId)
+                const propName = String(unwrapIfcValue(prop?.Name) || '')
+                if (!propName) continue
+                applyCsetProperty(existing, propName, prop?.NominalValue)
+            }
+            result.set(doorId, existing)
+        }
+    }
+
+    return result
+}
+
 /**
  * Extract Cset_StandardCH values for each door occurrence from IFC.
  * Supports direct door properties and properties assigned to door types.
  */
 export async function extractDoorCsetStandardCH(file: File): Promise<Map<number, DoorCsetStandardCHData>> {
     const api = await initializeIFCAPI()
-    const result = new Map<number, DoorCsetStandardCHData>()
-
     const arrayBuffer = await file.arrayBuffer()
     const data = new Uint8Array(arrayBuffer)
-
     const modelID = api.OpenModel(data)
     if (modelID === -1) {
         console.error('Failed to open IFC model for Cset_StandardCH extraction')
-        return result
+        return new Map()
     }
-
     try {
-        const doorIds = api.GetLineIDsWithType(modelID, IFCDOOR)
-        const doorSet = new Set<number>()
-        for (let i = 0; i < doorIds.size(); i++) {
-            doorSet.add(doorIds.get(i))
+        return extractDoorCsetStandardCHFromOpenModel(api, modelID)
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+/**
+ * Single `OpenModel` pass: operation types, Cset_StandardCH, and wall aggregate part → wall map.
+ * Use from CLI / batch scripts to avoid parsing the same IFC three times.
+ */
+export async function extractDoorAnalyzerSidecarMaps(file: File): Promise<{
+    operationTypeMap: Map<number, string>
+    csetStandardCHMap: Map<number, DoorCsetStandardCHData>
+    wallAggregatePartMap: Map<number, number>
+}> {
+    const api = await initializeIFCAPI()
+    const data = new Uint8Array(await file.arrayBuffer())
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for batched door sidecar extraction')
+        return {
+            operationTypeMap: new Map(),
+            csetStandardCHMap: new Map(),
+            wallAggregatePartMap: new Map(),
         }
-
-        // Build type -> doors map (to propagate type-level psets)
-        const typeToDoors = new Map<number, number[]>()
-        const relDefinesByTypeIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYTYPE)
-        for (let i = 0; i < relDefinesByTypeIds.size(); i++) {
-            const rel = api.GetLine(modelID, relDefinesByTypeIds.get(i))
-            if (!rel?.RelatingType?.value || !Array.isArray(rel?.RelatedObjects)) continue
-            const typeId = rel.RelatingType.value as number
-            for (const obj of rel.RelatedObjects) {
-                const doorId = obj?.value
-                if (typeof doorId !== 'number' || !doorSet.has(doorId)) continue
-                const arr = typeToDoors.get(typeId) || []
-                arr.push(doorId)
-                typeToDoors.set(typeId, arr)
-            }
+    }
+    try {
+        return {
+            operationTypeMap: extractDoorOperationTypesFromOpenModel(api, modelID),
+            csetStandardCHMap: extractDoorCsetStandardCHFromOpenModel(api, modelID),
+            wallAggregatePartMap: extractWallAggregatePartsFromOpenModel(api, modelID),
         }
-
-        const relDefinesByPropsIds = api.GetLineIDsWithType(modelID, IFCRELDEFINESBYPROPERTIES)
-        for (let i = 0; i < relDefinesByPropsIds.size(); i++) {
-            const rel = api.GetLine(modelID, relDefinesByPropsIds.get(i))
-            const relatingPropDefId = rel?.RelatingPropertyDefinition?.value
-            if (typeof relatingPropDefId !== 'number') continue
-
-            const pset = api.GetLine(modelID, relatingPropDefId)
-            const psetName = String(unwrapIfcValue(pset?.Name) || '')
-            const normalizedPsetName = normalizeIfcName(psetName)
-            const isRelevantPset =
-                normalizedPsetName === 'csetstandardch'
-                || normalizedPsetName === 'psetdoorcommon'
-                || normalizedPsetName.startsWith('al00')
-                || normalizedPsetName.startsWith('in01')
-            if (!isRelevantPset) continue
-
-            const hasProperties = Array.isArray(pset?.HasProperties) ? pset.HasProperties : []
-            const targetDoorIds = new Set<number>()
-            const relatedObjects = Array.isArray(rel?.RelatedObjects) ? rel.RelatedObjects : []
-            for (const obj of relatedObjects) {
-                const objId = obj?.value
-                if (typeof objId !== 'number') continue
-                if (doorSet.has(objId)) {
-                    targetDoorIds.add(objId)
-                } else {
-                    const doorsForType = typeToDoors.get(objId)
-                    if (doorsForType) doorsForType.forEach((id) => targetDoorIds.add(id))
-                }
-            }
-
-            if (targetDoorIds.size === 0) continue
-
-            for (const doorId of targetDoorIds) {
-                const existing = result.get(doorId) || emptyDoorCsetStandardCHData()
-                for (const propRef of hasProperties) {
-                    const propId = propRef?.value
-                    if (typeof propId !== 'number') continue
-                    const prop = api.GetLine(modelID, propId)
-                    const propName = String(unwrapIfcValue(prop?.Name) || '')
-                    if (!propName) continue
-                    applyCsetProperty(existing, propName, prop?.NominalValue)
-                }
-                result.set(doorId, existing)
-            }
-        }
-
-        return result
     } finally {
         api.CloseModel(modelID)
     }

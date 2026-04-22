@@ -1,6 +1,6 @@
 /**
- * web-ifc Emscripten logs `[WEB-IFC]…` to **stdout** (and sometimes stderr).
- * Patch both streams before ts-node / IFC so plan test output stays readable.
+ * web-ifc Emscripten logs `[WEB-IFC]…` to **stdout** (fd 1), not stderr — see default_tty_ops vs default_tty1_ops.
+ * Patch stdout + stderr line buffers before ts-node / IFC so analyze output stays readable.
  */
 
 function installWebIfcConsoleNoiseFilter() {
@@ -71,7 +71,7 @@ function installWebIfcConsoleNoiseFilter() {
     }
 }
 
-installWebIfcConsoleNoiseFilter()
+const filter = installWebIfcConsoleNoiseFilter()
 
 require('ts-node').register({
     skipProject: true,
@@ -84,4 +84,4 @@ require('ts-node').register({
     },
 })
 
-require('./test-plan-door-visibility.ts')
+require('./analyze-door-plan-context.ts')
