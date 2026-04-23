@@ -2711,26 +2711,17 @@ function shouldRenderDeviceInElevation(
     return true
 }
 
-function deviceIntersectsPlanCut(context: DoorContext, device: THREE.Box3): boolean {
-    const frame = context.viewFrame
-    const cutHeight = frame.origin.y - frame.height / 2 + 1.2
-    const cutTolerance = Math.max(0.1, frame.thickness)
-    if (device.min.y <= cutHeight + cutTolerance && device.max.y >= cutHeight - cutTolerance) {
-        return true
-    }
+const PLAN_CUT_HEIGHT_METERS = 1.8
 
-    const bounds = measureBoundingBoxInAxes(device, frame.widthAxis, frame.upAxis, frame.semanticFacing)
-    const doorBounds = measureBoundingBoxInAxes(context.door.boundingBox!, frame.widthAxis, frame.upAxis, frame.semanticFacing)
-    const centerA = (bounds.minA + bounds.maxA) / 2
-    const centerHeight = (device.min.y + device.max.y) / 2
-    const jambBand = Math.max(frame.width * 0.18, 0.2)
-    return (
-        Math.abs(centerHeight - cutHeight) <= 0.35
-        && (
-        Math.abs(centerA - doorBounds.minA) <= jambBand
-        || Math.abs(centerA - doorBounds.maxA) <= jambBand
-        )
-    )
+function deviceVisibleInPlan(context: DoorContext, device: THREE.Box3): boolean {
+    const frame = context.viewFrame
+    const cutHeight = frame.origin.y - frame.height / 2 + PLAN_CUT_HEIGHT_METERS
+    // Standard architectural convention: anything whose lowest point sits at
+    // or below the cut plane projects into the plan. A ceiling light at
+    // y=2.5 m has min.y > cut and is (correctly) omitted; a wall switch,
+    // outlet, or low appliance is kept regardless of whether it spans the
+    // cut line.
+    return device.min.y <= cutHeight + 0.02
 }
 
 function shouldRenderDeviceInPlan(
@@ -2747,14 +2738,14 @@ function shouldRenderDeviceInPlan(
     )?.side
 
     if (side === 'front' || side === 'back') {
-        return deviceIntersectsPlanCut(context, device.boundingBox)
+        return deviceVisibleInPlan(context, device.boundingBox)
     }
     if (side === 'unknown') {
         return false
     }
 
     // Preserve previous behavior only for truly legacy contexts with no metadata.
-    return deviceIntersectsPlanCut(context, device.boundingBox)
+    return deviceVisibleInPlan(context, device.boundingBox)
 }
 
 function hasVisibleDevicesForView(
@@ -5561,7 +5552,7 @@ function renderPlanFromMeshes(
     }
 
     const frame = context.viewFrame
-    const cutHeight = frame.origin.y - frame.height / 2 + 1.2
+    const cutHeight = frame.origin.y - frame.height / 2 + PLAN_CUT_HEIGHT_METERS
     const margin = Math.max(opts.margin, 0.5)
     const frustumWidth = frame.width + margin * 2
     const frustumHeight = frame.width * 2 + frame.thickness + margin * 2
