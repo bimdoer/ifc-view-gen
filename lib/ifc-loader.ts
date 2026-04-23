@@ -214,6 +214,118 @@ export async function extractDoorOperationTypes(file: File): Promise<Map<number,
  * Extract a direct door -> host building element map by joining
  * IfcRelFillsElement (door -> opening) with IfcRelVoidsElement (opening -> host).
  */
+/**
+ * Extract a map of element expressID → IfcBuildingStorey name by walking
+ * every IfcRelContainedInSpatialStructure relation in the IFC.  Used by the
+ * node-side render pipeline to populate `DoorContext.storeyName` (which the
+ * browser-side code normally fills in via the Fragments spatial tree).
+ */
+/**
+ * Extract a map of element expressID → IfcBuildingStorey elevation (metres,
+ * in the IFC's own world frame). Feeds the elevation-view storey marker so
+ * the "0.00" tick sits on the IfcBuildingStorey's declared level instead of
+ * the top of whatever slab the door happens to rest on.
+ */
+export async function extractElementStoreyElevationMap(file: File): Promise<Map<number, number>> {
+    const api = await initializeIFCAPI()
+    const result = new Map<number, number>()
+
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for storey elevation extraction')
+        return result
+    }
+
+    try {
+        const relContainedType = (WebIFC as any).IFCRELCONTAINEDINSPATIALSTRUCTURE
+        const storeyType = (WebIFC as any).IFCBUILDINGSTOREY
+        if (typeof relContainedType !== 'number' || typeof storeyType !== 'number') {
+            return result
+        }
+
+        const storeyElevations = new Map<number, number>()
+        const storeyIds = api.GetLineIDsWithType(modelID, storeyType)
+        for (let i = 0; i < storeyIds.size(); i++) {
+            const id = storeyIds.get(i)
+            const entity = api.GetLine(modelID, id)
+            const elevation = entity?.Elevation?.value
+            if (typeof elevation === 'number' && Number.isFinite(elevation)) {
+                storeyElevations.set(id, elevation)
+            }
+        }
+
+        const relIds = api.GetLineIDsWithType(modelID, relContainedType)
+        for (let i = 0; i < relIds.size(); i++) {
+            const rel = api.GetLine(modelID, relIds.get(i))
+            const relatingId = rel?.RelatingStructure?.value
+            if (typeof relatingId !== 'number') continue
+            const elevation = storeyElevations.get(relatingId)
+            if (elevation === undefined) continue
+            for (const ref of normalizeIfcRefAttribute(rel?.RelatedElements)) {
+                if (typeof ref?.value === 'number') result.set(ref.value, elevation)
+            }
+        }
+
+        return result
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
+export async function extractElementStoreyMap(file: File): Promise<Map<number, string>> {
+    const api = await initializeIFCAPI()
+    const result = new Map<number, string>()
+
+    const arrayBuffer = await file.arrayBuffer()
+    const data = new Uint8Array(arrayBuffer)
+
+    const modelID = api.OpenModel(data)
+    if (modelID === -1) {
+        console.error('Failed to open IFC model for storey extraction')
+        return result
+    }
+
+    try {
+        const relContainedType = (WebIFC as any).IFCRELCONTAINEDINSPATIALSTRUCTURE
+        const storeyType = (WebIFC as any).IFCBUILDINGSTOREY
+        if (typeof relContainedType !== 'number' || typeof storeyType !== 'number') {
+            return result
+        }
+
+        const storeyNames = new Map<number, string>()
+        const storeyIds = api.GetLineIDsWithType(modelID, storeyType)
+        for (let i = 0; i < storeyIds.size(); i++) {
+            const id = storeyIds.get(i)
+            const entity = api.GetLine(modelID, id)
+            const name = entity?.Name?.value ?? entity?.LongName?.value
+            if (typeof name === 'string' && name.trim()) {
+                storeyNames.set(id, name.trim())
+            }
+        }
+
+        const relIds = api.GetLineIDsWithType(modelID, relContainedType)
+        for (let i = 0; i < relIds.size(); i++) {
+            const rel = api.GetLine(modelID, relIds.get(i))
+            const relatingId = rel?.RelatingStructure?.value
+            if (typeof relatingId !== 'number') continue
+            const name = storeyNames.get(relatingId)
+            if (!name) continue
+            // `IfcRelContainedInSpatialStructure` uses `RelatedElements`, not
+            // `RelatedObjects`.
+            for (const ref of normalizeIfcRefAttribute(rel?.RelatedElements)) {
+                if (typeof ref?.value === 'number') result.set(ref.value, name)
+            }
+        }
+
+        return result
+    } finally {
+        api.CloseModel(modelID)
+    }
+}
+
 export async function extractDoorHostRelationships(file: File): Promise<Map<number, number>> {
     const api = await initializeIFCAPI()
     const result = new Map<number, number>()

@@ -112,6 +112,7 @@ export interface DoorContext {
     openingDirection: string | null
     doorTypeName: string | null
     storeyName: string | null  // Building storey name from spatial structure
+    storeyElevation?: number | null  // IfcBuildingStorey.Elevation (world-metres)
     csetStandardCH?: {
         alTuernummer: string | null
         geometryType: string | null
@@ -816,49 +817,24 @@ function isStairType(typeName: string, ifcType?: number): boolean {
 }
 
 /**
- * Checks if an element type represents an electrical device
+ * Only the discrete device entity types count — no cable/duct/pipe infra,
+ * no fittings, no abstract distribution bases, no substring matches on
+ * `panel` (catches `IfcCoveringPanel`) or `carrier` (catches the cable run).
  */
+const ELECTRICAL_DEVICE_TYPES: ReadonlySet<string> = new Set([
+    'IFCELECTRICAPPLIANCE',
+    'IFCSWITCHINGDEVICE',
+    'IFCOUTLET',
+    'IFCLAMP',
+    'IFCLIGHTFIXTURE',
+    'IFCELECTRICDISTRIBUTIONBOARD',
+    'IFCJUNCTIONBOX',
+    'IFCELECTRICGENERATOR',
+    'IFCFLOWTERMINAL',
+])
+
 function isElectricalDeviceType(typeName: string): boolean {
-    // IfcCableSegment must not be treated as a nearby electrical device (excluded from plan/elevation SVG).
-    // Must run before lower.includes('cable'), since "IFCCABLESEGMENT" contains the substring "cable".
-    if (typeName.toUpperCase() === 'IFCCABLESEGMENT') {
-        return false
-    }
-    const lower = typeName.toLowerCase()
-    return (
-        lower.includes('electrical') ||
-        lower.includes('electric') ||
-        lower.includes('cable') ||
-        lower.includes('conduit') ||
-        lower.includes('carrier') ||
-        lower.includes('junction') ||
-        lower.includes('switch') ||
-        lower.includes('outlet') ||
-        lower.includes('socket') ||
-        lower.includes('light') ||
-        lower.includes('fixture') ||
-        lower.includes('panel') ||
-        // Match only specific electrical distribution concretes (e.g. distribution board),
-        // not the abstract `IfcDistributionFlowElement` / `IfcDistributionControlElement`
-        // bases which also cover HVAC / plumbing.
-        lower.includes('distributionboard') ||
-        // IFCFLOWTERMINAL covers sinks/diffusers as well as outlets/switches; it is kept
-        // because in typical door-context IFC exports flow terminals near doors are almost
-        // always electrical (wall outlets / light fixtures). The abstract base classes
-        // (IfcFlowSegment, IfcFlowController, IfcDistributionFlowElement,
-        // IfcDistributionControlElement) are intentionally excluded: they also cover
-        // HVAC/plumbing elements which must not enter the nearby-device set or they would
-        // crowd out real switches/outlets given the selection cap.
-        typeName === 'IFCFLOWTERMINAL' ||
-        typeName === 'IFCSWITCHINGDEVICE' ||
-        typeName === 'IFCOUTLET' ||
-        typeName === 'IFCLIGHTFIXTURE' ||
-        typeName === 'IFCELECTRICDISTRIBUTIONBOARD' ||
-        typeName === 'IFCJUNCTIONBOX' ||
-        typeName === 'IFCCABLECARRIERSEGMENT' ||
-        typeName === 'IFCELECTRICAPPLIANCE' ||
-        typeName.startsWith('IFCELECTRICAPPLIANCE')
-    )
+    return ELECTRICAL_DEVICE_TYPES.has(typeName.toUpperCase())
 }
 
 const elementNormalCache = new WeakMap<ElementInfo, THREE.Vector3>()
@@ -1438,7 +1414,8 @@ function findHostSlabs(
     door: ElementInfo,
     hostWall: ElementInfo | null,
     slabs: ElementInfo[],
-    viewFrame: DoorViewFrame
+    viewFrame: DoorViewFrame,
+    slabAggregatePartMap?: Map<number, number>
 ): {
     below: ElementInfo | null
     above: ElementInfo | null
@@ -1529,6 +1506,14 @@ function findHostSlabs(
     const MAX_STOREY_OFFSET_METERS = 1.5
     const COMPOSITE_STACK_TOLERANCE_METERS = 0.1
 
+    // Aggregate-aware stack:
+    //  - The primary element's aggregate parent (from slabAggregatePartMap) defines
+    //    the *one* floor build-up we'll include. Parts belonging to OTHER aggregate
+    //    parents (parallel floor systems in adjacent rooms that share heights) are
+    //    dropped even if they touch our layers vertically.
+    //  - After we've added one real IfcSlab (not a part) to the stack, no further
+    //    elements are accepted — that slab is the structural floor; anything below
+    //    it belongs to the next storey.
     const keepCompositeStack = (
         candidates: Candidate[],
         direction: 'below' | 'above'
@@ -1541,35 +1526,44 @@ function findHostSlabs(
         if (!primaryBox) return [primary.element]
         const primaryRange = measureBoxAlongAxis(primaryBox, upAxis)
 
+        const primaryAggregate = slabAggregatePartMap?.get(primary.element.expressID) ?? null
+        const primaryIsStructuralSlab = primaryAggregate === null
+        const allowedAggregates = new Set<number>()
+        if (primaryAggregate !== null) allowedAggregates.add(primaryAggregate)
+
         const keep: ElementInfo[] = [primary.element]
         const layers = [{ minB: primaryRange.min, maxB: primaryRange.max }]
+        let structuralSlabAdded = primaryIsStructuralSlab
 
         for (let i = 1; i < candidates.length; i++) {
+            if (structuralSlabAdded) break
             const candidate = candidates[i]
             if (candidate.gap > MAX_STOREY_OFFSET_METERS) continue
             const box = candidate.element.boundingBox
             if (!box) continue
+
+            const candAggregate = slabAggregatePartMap?.get(candidate.element.expressID) ?? null
+            const candIsStructuralSlab = candAggregate === null
+
+            // Drop parts from parallel aggregates — same height band, different
+            // spatial region (e.g. balcony slab layers in the same building).
+            if (!candIsStructuralSlab && !allowedAggregates.has(candAggregate!)) continue
+
             const range = measureBoxAlongAxis(box, upAxis)
-            // Composite stack: candidate must touch at least one existing layer
-            // within COMPOSITE_STACK_TOLERANCE_METERS along the vertical axis.
             const touchesExisting = layers.some((layer) => {
                 const overlap = Math.min(layer.maxB, range.max) - Math.max(layer.minB, range.min)
                 if (overlap > -COMPOSITE_STACK_TOLERANCE_METERS) return true
-                // Asymmetric adjacency: a "below"-direction candidate must stack UNDER an
-                // existing layer (its top touches the layer's bottom). An "above"-direction
-                // candidate must stack OVER an existing layer (its bottom touches the layer's
-                // top). The previous symmetric check accepted geometrically implausible
-                // arrangements (e.g. an "above" layer whose top sat flush with the primary's
-                // bottom), which could pull floors from the wrong storey into elevation host
-                // context.
                 if (direction === 'below') {
                     return Math.abs(range.max - layer.minB) <= COMPOSITE_STACK_TOLERANCE_METERS
                 }
                 return Math.abs(range.min - layer.maxB) <= COMPOSITE_STACK_TOLERANCE_METERS
             })
-            if (touchesExisting) {
-                keep.push(candidate.element)
-                layers.push({ minB: range.min, maxB: range.max })
+            if (!touchesExisting) continue
+
+            keep.push(candidate.element)
+            layers.push({ minB: range.min, maxB: range.max })
+            if (candIsStructuralSlab) {
+                structuralSlabAdded = true
             }
         }
 
@@ -1742,7 +1736,9 @@ function findNearbyDevices(
     hostWall: ElementInfo | null,
     viewFrame: DoorViewFrame,
     radius: number = 1.25,
-    limit: number = 8
+    limit: number = 8,
+    elementStoreyElevationMap?: Map<number, number>,
+    doorStoreyElevation?: number | null
 ): ElementInfo[] {
     if (!door.boundingBox) return []
 
@@ -1756,8 +1752,21 @@ function findNearbyDevices(
     const expandedDoorVerticalMax = doorBoundsInFrame.maxB
     const edgeBandThreshold = Math.max(viewFrame.width * 0.18, 0.24)
 
+    // Storey filter: drop any device whose IfcBuildingStorey.Elevation differs
+    // from the door's by more than STOREY_TOLERANCE. The elec IFC usually
+    // reuses storey names across floors, so this prevents a socket from the
+    // floor below being offered as a candidate just because it's within 1.25m.
+    const STOREY_TOLERANCE_METERS = 1.5
+    const storeyFilter = (device: ElementInfo): boolean => {
+        if (doorStoreyElevation == null || !elementStoreyElevationMap) return true
+        const deviceStoreyElev = elementStoreyElevationMap.get(device.expressID)
+        if (deviceStoreyElev == null) return true
+        return Math.abs(deviceStoreyElev - doorStoreyElevation) <= STOREY_TOLERANCE_METERS
+    }
+
     const filtered = devices
         .filter((device) => device.boundingBox)
+        .filter(storeyFilter)
         .map((device) => {
             const candidateBox = device.boundingBox!
             const candidateCenter = candidateBox.getCenter(new THREE.Vector3())
@@ -2423,7 +2432,11 @@ export async function analyzeDoors(
     doorLeafMetadataMap?: Map<number, DoorLeafMetadata>,
     hostRelationshipMap?: Map<number, number>,
     slabAggregatePartMap?: Map<number, number>,
-    wallAggregatePartMap?: Map<number, number>
+    wallAggregatePartMap?: Map<number, number>,
+    /** expressID → IfcBuildingStorey.Elevation (metres) for both arch and elec
+     *  elements. Used to drop devices whose storey doesn't match the door's.
+     */
+    elementStoreyElevationMap?: Map<number, number>
 ): Promise<DoorContext[]> {
     // Build storey map from spatial structure for quick lookup
     const storeyMap = buildStoreyMap(spatialStructure)
@@ -2437,12 +2450,14 @@ export async function analyzeDoors(
     const stairs: ElementInfo[] = []
     const devices: ElementInfo[] = []
 
-    // Helper to process elements from a model
-    const processElements = (elements: ElementInfo[]) => {
+    // Helper to process elements from a model. `isSecondary` gates the
+    // electrical-device branch so devices come ONLY from the electrical IFC;
+    // anything that looks like an electrical appliance in the AR IFC is
+    // silently ignored (those are almost always stray / modelling artefacts).
+    const processElements = (elements: ElementInfo[], isSecondary: boolean) => {
         for (const element of elements) {
             if (isDoorType(element.typeName, element.ifcType)) {
                 doors.push(element)
-                // console.log(`Found door: ExpressID ${element.expressID}, typeName="${element.typeName}"`)
             } else if (isWindowType(element.typeName, element.ifcType)) {
                 windows.push(element)
             } else if (isWallType(element.typeName, element.ifcType)) {
@@ -2456,18 +2471,18 @@ export async function analyzeDoors(
                 coverings.push(element)
             } else if (isStairType(element.typeName, element.ifcType)) {
                 stairs.push(element)
-            } else if (isElectricalDeviceType(element.typeName)) {
+            } else if (isSecondary && isElectricalDeviceType(element.typeName)) {
                 devices.push(element)
             }
         }
     }
 
-    // Process primary model
-    processElements(model.elements)
+    // Process primary (architecture) model — no devices harvested from here.
+    processElements(model.elements, false)
 
-    // Process secondary model if provided
+    // Process secondary (electrical) model — this is where devices come from.
     if (secondaryModel) {
-        processElements(secondaryModel.elements)
+        processElements(secondaryModel.elements, true)
     }
 
     const wallByExpressID = new Map<number, ElementInfo>()
@@ -2529,10 +2544,21 @@ export async function analyzeDoors(
             above: hostSlabAbove,
             belowAll: hostSlabsBelow,
             aboveAll: hostSlabsAbove,
-        } = findHostSlabs(door, hostWall, slabs, viewFrame)
+        } = findHostSlabs(door, hostWall, slabs, viewFrame, slabAggregatePartMap)
         const hostCeilings = findHostCeilings(door, hostWall, coverings, viewFrame)
         const nearbyStairs = findNearbyStairs(door, stairs, viewFrame)
-        const nearbyDevices = findNearbyDevices(door, devices, geometricNormal, hostWall, viewFrame)
+        const doorStoreyElev = elementStoreyElevationMap?.get(door.expressID)
+        const nearbyDevices = findNearbyDevices(
+            door,
+            devices,
+            geometricNormal,
+            hostWall,
+            viewFrame,
+            undefined,
+            undefined,
+            elementStoreyElevationMap,
+            doorStoreyElev ?? null
+        )
         const nearbyDeviceVisibility = nearbyDevices.map((device) =>
             classifyNearbyDeviceVisibility(device, hostWall, viewFrame)
         )
