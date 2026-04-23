@@ -1991,9 +1991,10 @@ function createSemanticElevationNearbyWallGeometry(
     const originA = frame.origin.dot(frame.widthAxis)
     const originB = frame.origin.dot(frame.upAxis)
     const nearbyWallMeshes = getNearbyWallMeshes(context)
-    const lateralPad = Math.max(frame.width * 0.5, 0.5)
-    const minA = -frame.width / 2 - lateralPad
-    const maxA = frame.width / 2 + lateralPad
+    // Vertical clamp still uses the door's storey band; lateral clamping is
+    // handled downstream by `elevationHostClipBounds` so perpendicular walls
+    // outside the door-width corridor (e.g. ±1.3 m at a niche) don't get
+    // collapsed to empty rects here.
     const minB = -frame.height / 2 - getElevationBottomContextGapMeters(context) - 0.1
     const maxB = frame.height / 2 + getElevationTopContextGapMeters(context) + 0.2
 
@@ -2012,16 +2013,16 @@ function createSemanticElevationNearbyWallGeometry(
         )
         if (!bounds) continue
         const rect: AxisRect = {
-            minA: Math.max(bounds.minA - originA, minA),
-            maxA: Math.min(bounds.maxA - originA, maxA),
+            minA: bounds.minA - originA,
+            maxA: bounds.maxA - originA,
             minB: Math.max(bounds.minB - originB, minB),
             maxB: Math.min(bounds.maxB - originB, maxB),
         }
         if (rect.maxA <= rect.minA || rect.maxB <= rect.minB) continue
         if (rect.maxA - rect.minA < 0.18) {
             const expand = (0.18 - (rect.maxA - rect.minA)) / 2
-            rect.minA = Math.max(rect.minA - expand, minA)
-            rect.maxA = Math.min(rect.maxA + expand, maxA)
+            rect.minA = rect.minA - expand
+            rect.maxA = rect.maxA + expand
         }
         if (rect.maxB - rect.minB < 0.4) {
             const expand = (0.4 - (rect.maxB - rect.minB)) / 2
