@@ -46,13 +46,11 @@ async function initializeIFCAPI(): Promise<IfcAPI> {
         try {
             const ifcAPIInstance = new IfcAPI()
 
-            // IMPORTANT: SetWasmPath expects a directory path where the wasm file is located
-            // The second parameter (true) indicates this is an absolute path
-            // This prevents the library from adding the origin URL again
-            const wasmPath = typeof window === 'undefined'
-                ? `${process.cwd()}/public/wasm/web-ifc/`
-                : '/wasm/web-ifc/'
-            ifcAPIInstance.SetWasmPath(wasmPath, true)
+            // In Node, web-ifc resolves its wasm correctly by default. Forcing a
+            // path here can fail on Windows with opaque init errors (e.g. 74872).
+            if (typeof window !== 'undefined') {
+                ifcAPIInstance.SetWasmPath('/wasm/web-ifc/', true)
+            }
 
             await ifcAPIInstance.Init()
             ifcAPI = ifcAPIInstance
