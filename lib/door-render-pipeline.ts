@@ -6,6 +6,8 @@ import {
     extractDoorAnalyzerSidecarMaps,
     extractDoorHostRelationships,
     extractDoorLeafMetadata,
+    extractElementStoreyElevationMap,
+    extractElementStoreyMap,
     extractSlabAggregateParts,
     loadIFCModelWithMetadata,
 } from './ifc-loader'
@@ -73,23 +75,54 @@ export async function renderDoorsFromIfc(
     const elecFile = elecIfcPath ? loadIfcFile(elecIfcPath) : undefined
 
     const model = await loadIFCModelWithMetadata(archFile)
+    // Load the electrical IFC as a secondary model so analyzeDoors can harvest
+    // nearby-device candidates from it (the AR IFC never contributes devices).
+    const secondaryModel = elecFile ? await loadIFCModelWithMetadata(elecFile) : undefined
     const { operationTypeMap, csetStandardCHMap, wallAggregatePartMap } =
         await extractDoorAnalyzerSidecarMaps(archFile)
     const doorLeafMetadataMap = await extractDoorLeafMetadata(archFile)
     const hostRelationshipMap = await extractDoorHostRelationships(archFile)
     const slabAggregatePartMap = await extractSlabAggregateParts(archFile)
 
+    // Merge storey elevations from arch + elec so the nearby-device storey
+    // filter can match a door's storey to the elec element's storey.
+    const storeyElevationMap = new Map<number, number>()
+    for (const [id, elev] of await extractElementStoreyElevationMap(archFile)) {
+        storeyElevationMap.set(id, elev)
+    }
+    if (elecFile) {
+        for (const [id, elev] of await extractElementStoreyElevationMap(elecFile)) {
+            storeyElevationMap.set(id, elev)
+        }
+    }
+
     const contexts = await analyzeDoors(
         model,
-        undefined,
+        secondaryModel,
         undefined,
         operationTypeMap,
         csetStandardCHMap,
         doorLeafMetadataMap,
         hostRelationshipMap,
         slabAggregatePartMap,
-        wallAggregatePartMap
+        wallAggregatePartMap,
+        storeyElevationMap
     )
+
+    // The browser pipeline fills storeyName from the Fragments spatial tree;
+    // here we extract it straight from IFCRELCONTAINEDINSPATIALSTRUCTURE so
+    // elevations can draw the storey marker just like the web viewer.
+    const storeyMap = await extractElementStoreyMap(archFile)
+    for (const ctx of contexts) {
+        if (!ctx.storeyName) {
+            const name = storeyMap.get(ctx.door.expressID)
+            if (name) ctx.storeyName = name
+        }
+        if (ctx.storeyElevation == null) {
+            const elevation = storeyElevationMap.get(ctx.door.expressID)
+            if (elevation != null) ctx.storeyElevation = elevation
+        }
+    }
 
     const requested = [...new Set([...targetGuids].map((g) => g.trim()).filter(Boolean))]
     const contextByGuid = new Map(contexts.map((c) => [c.doorId, c]))
