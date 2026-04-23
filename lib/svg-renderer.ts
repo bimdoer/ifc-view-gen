@@ -91,6 +91,9 @@ export function planSvgCanvasHeight(canvasWidth: number): number {
     return Math.round(canvasWidth * PLAN_SVG_HEIGHT_RATIO)
 }
 
+const DEBUG_INGEST_ENDPOINT = 'http://127.0.0.1:7608/ingest/541b0157-3c53-498b-b181-d30bf9fa6695'
+const DEBUG_SESSION_ID = '2d93f2'
+
 const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     width: 1000,
     height: 1000,
@@ -156,12 +159,12 @@ interface AxisBounds {
 }
 
 const HOST_WALL_PERPENDICULAR_CROP_METERS = 1.0
-const DOOR_EDGE_STROKE_FACTOR = 0.85
+const DOOR_EDGE_STROKE_FACTOR = 0.7
 const WALL_EDGE_STROKE_FACTOR = 1.15
 
 /** Open mesh-section chains whose endpoints lie within this (xz) distance are closed for gray fill. */
 const PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS = 0.025
-const DEVICE_EDGE_STROKE_FACTOR = 1.0
+const DEVICE_EDGE_STROKE_FACTOR = 0.75
 const CONTEXT_DOOR_EDGE_STROKE_FACTOR = 0.55
 const CONTEXT_DOOR_FILL_COLOR = '#d1d5db'
 const CONTEXT_DOOR_LINE_COLOR = '#6b7280'
@@ -2304,7 +2307,9 @@ function addMeshPlanSectionForWall(
     fillColor: string,
     strokeColor: string,
     layer: number,
-    out: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
+    out: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] },
+    fillOpacity: number = 1,
+    edgeStrokeFactor: number = WALL_EDGE_STROKE_FACTOR
 ): number {
     const segments = extractMeshSectionSegments(mesh, cutY)
     if (segments.length === 0) return 0
@@ -2333,8 +2338,8 @@ function addMeshPlanSectionForWall(
             fillColor,
             strokeColor,
             layer,
-            1,
-            WALL_EDGE_STROKE_FACTOR
+            fillOpacity,
+            edgeStrokeFactor
         )
         emitted++
     }
@@ -2355,13 +2360,46 @@ function addMeshPlanSectionForWall(
                 color: strokeColor,
                 depth: (proj1.z + proj2.z) / 2,
                 layer,
-                strokeWidthFactor: WALL_EDGE_STROKE_FACTOR,
+                strokeWidthFactor: edgeStrokeFactor,
             })
             emitted++
         }
     }
 
     return emitted
+}
+
+/**
+ * Plan corridor (width × depth) around the host door, matching fit/clip for
+ * {@link createMeshPlanSectionGeometry} and nearby opening mesh sectioning.
+ */
+function getPlanSectionCorridor(
+    context: DoorContext,
+    options: Required<SVGRenderOptions>
+): PlanSectionCorridor {
+    const frame = context.viewFrame
+    const widthAxis = frame.widthAxis.clone().normalize()
+    const depthAxis = frame.semanticFacing.clone().normalize()
+    const halfDoorWidth = frame.width / 2
+    const halfT = frame.thickness / 2
+    const planPad = Math.max(options.planCropMarginMeters, 0)
+    const wallMetrics = getLocalHostWallPlanMetrics(context)
+    const hostWallThickness = wallMetrics?.thickness ?? frame.thickness
+    const lateralExtend = halfDoorWidth + planPad
+    const depthHalfSpan = Math.max(halfT, hostWallThickness / 2) + planPad
+    const relDepthMin = -depthHalfSpan
+    const relDepthMax = depthHalfSpan
+    const originWidth = frame.origin.dot(widthAxis)
+    const originDepth = frame.origin.dot(depthAxis)
+
+    return {
+        widthAxis,
+        depthAxis,
+        minWidth: originWidth - halfDoorWidth - lateralExtend,
+        maxWidth: originWidth + halfDoorWidth + lateralExtend,
+        minDepth: originDepth + relDepthMin,
+        maxDepth: originDepth + relDepthMax,
+    }
 }
 
 /**
@@ -2388,31 +2426,7 @@ function createMeshPlanSectionGeometry(
         return out
     }
 
-    // Corridor matches plan crop margin: door ± pad in width and depth so section
-    // geometry exists inside the same window that fit/clip uses (not full IFC wall).
-    const frame = context.viewFrame
-    const widthAxis = frame.widthAxis.clone().normalize()
-    const depthAxis = frame.semanticFacing.clone().normalize()
-    const halfDoorWidth = frame.width / 2
-    const halfT = frame.thickness / 2
-    const planPad = Math.max(options.planCropMarginMeters, 0)
-    const wallMetrics = getLocalHostWallPlanMetrics(context)
-    const hostWallThickness = wallMetrics?.thickness ?? frame.thickness
-    const lateralExtend = halfDoorWidth + planPad
-    const depthHalfSpan = Math.max(halfT, hostWallThickness / 2) + planPad
-    const relDepthMin = -depthHalfSpan
-    const relDepthMax = depthHalfSpan
-    const originWidth = frame.origin.dot(widthAxis)
-    const originDepth = frame.origin.dot(depthAxis)
-
-    const corridor: PlanSectionCorridor = {
-        widthAxis,
-        depthAxis,
-        minWidth: originWidth - halfDoorWidth - lateralExtend,
-        maxWidth: originWidth + halfDoorWidth + lateralExtend,
-        minDepth: originDepth + relDepthMin,
-        maxDepth: originDepth + relDepthMax,
-    }
+    const corridor = getPlanSectionCorridor(context, options)
 
     for (const mesh of wallMeshes) {
         addMeshPlanSectionForWall(
@@ -2430,6 +2444,82 @@ function createMeshPlanSectionGeometry(
     }
 
     return out
+}
+
+/**
+ * Mesh-based plan section for nearby IfcDoor / IfcWindow context (cut plane
+ * at storey height), clipped to the same corridor as the host wall section.
+ * Returns empty geometry when there are no meshes to section.
+ */
+function createMeshPlanSectionNearbyOpeningsGeometry(
+    context: DoorContext,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    cutY: number,
+    options: Required<SVGRenderOptions>
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const out = { edges: [] as ProjectedEdge[], polygons: [] as ProjectedPolygon[] }
+    const openingMeshes = [...getNearbyDoorMeshes(context), ...getNearbyWindowMeshes(context)]
+    if (openingMeshes.length === 0) {
+        return out
+    }
+    const corridor = getPlanSectionCorridor(context, options)
+    const contextLayer = -0.25
+    for (const mesh of openingMeshes) {
+        addMeshPlanSectionForWall(
+            mesh,
+            cutY,
+            corridor,
+            camera,
+            width,
+            height,
+            CONTEXT_DOOR_FILL_COLOR,
+            CONTEXT_DOOR_LINE_COLOR,
+            contextLayer,
+            out,
+            CONTEXT_DOOR_FILL_OPACITY,
+            CONTEXT_DOOR_EDGE_STROKE_FACTOR
+        )
+    }
+    return out
+}
+
+function planNearbyOpeningsHasMeshContent(g: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }): boolean {
+    if (g.polygons.length > 0) return true
+    return g.edges.length > 0
+}
+
+/**
+ * Plan view: nearby context doors and windows. Prefer mesh sectioning at the
+ * cut height (IFC triangulation + corridor clip); if that yields nothing (no
+ * meshes, empty cut, fragments), fall back to the legacy axis-aligned rects.
+ */
+function createPlanNearbyOpeningsGeometry(
+    context: DoorContext,
+    camera: THREE.OrthographicCamera,
+    width: number,
+    height: number,
+    cutY: number,
+    options: Required<SVGRenderOptions>
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const meshGeo = createMeshPlanSectionNearbyOpeningsGeometry(
+        context,
+        camera,
+        width,
+        height,
+        cutY,
+        options
+    )
+    if (planNearbyOpeningsHasMeshContent(meshGeo)) {
+        return meshGeo
+    }
+    const door = createSemanticPlanNearbyDoorGeometry(context, camera, width, height, cutY)
+    const win = createSemanticPlanNearbyWindowGeometry(context, camera, width, height, cutY)
+    return {
+        edges: [...door.edges, ...win.edges],
+        polygons: [...door.polygons, ...win.polygons],
+    }
 }
 
 function createSemanticPlanWallGeometry(
@@ -2851,6 +2941,8 @@ interface RenderMeta {
     suppressSyntheticWallBands?: boolean
     /** When set (e.g. from front elevation), plan view uses this scale so door size matches Vorderansicht. */
     sharedDrawingScale?: number
+    /** When set, plan fit/zoom/clip use this AABB in projected (pre-transform) space instead of bounds from `fitGeometry`. */
+    planProjectedViewBounds?: ProjectedBounds
     planDoorBounds?: ProjectedBounds
     planWallBandBounds?: { minY: number; maxY: number }
     storeyMarkerProjectedY?: number
@@ -2884,6 +2976,33 @@ function resolveSvgViewTransform(
     const scaledHeight = contentHeight * scale
     const offsetX = padding + (availWidth - scaledWidth) / 2
     const offsetY = padding + (availHeight - scaledHeight) / 2
+    // #region agent log
+    fetch(DEBUG_INGEST_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': DEBUG_SESSION_ID },
+        body: JSON.stringify({
+            sessionId: DEBUG_SESSION_ID,
+            runId: process.env.DEBUG_RUN_ID ?? 'pre-fix',
+            hypothesisId: 'H2-dynamic-scale-fit',
+            location: 'lib/svg-renderer.ts:resolveSvgViewTransform',
+            message: 'Viewport transform and scale policy',
+            data: {
+                viewType,
+                contentWidth,
+                contentHeight,
+                availWidth,
+                availHeight,
+                naturalScale,
+                scale,
+                usesSharedScale: sharedDrawingScale !== undefined,
+                padding,
+                offsetX,
+                offsetY,
+            },
+            timestamp: Date.now(),
+        }),
+    }).catch(() => {})
+    // #endregion
     return { scale, offsetX, offsetY, viewHeight }
 }
 
@@ -2892,9 +3011,12 @@ function getViewportClipBounds(
     options: Required<SVGRenderOptions>,
     context: DoorContext | null,
     sharedDrawingScale?: number,
-    viewType: 'Front' | 'Back' | 'Plan' | '' = ''
+    viewType: 'Front' | 'Back' | 'Plan' | '' = '',
+    overrideFitBounds?: ProjectedBounds | null
 ): ProjectedBounds | null {
-    const fitBounds = getBoundsFromProjectedGeometry(fitGeometry.edges, fitGeometry.polygons)
+    const fitBounds =
+        overrideFitBounds
+        ?? getBoundsFromProjectedGeometry(fitGeometry.edges, fitGeometry.polygons)
     if (!fitBounds) return null
 
     const { scale, offsetX, offsetY, viewHeight } = resolveSvgViewTransform(
@@ -3168,21 +3290,48 @@ function getSvgViewportMetrics(
     availWidth: number
     availHeight: number
 } {
+    const effectiveFontSize = options.fontSize
     const hasDevices = hasVisibleDevicesForView(context, viewType)
     const hasWall = context ? Boolean(context.hostWall || context.wall) : false
     const hasSlabs = hasVisibleSlabsForView(context, viewType)
     const showLegendActual = options.showLegend && (hasDevices || hasWall || hasSlabs)
-    const lineStep = options.fontSize * 1.5
+    const lineStep = effectiveFontSize * 1.5
     const labelLines = options.showLabels ? 2 : 0
     const legendLines = showLegendActual ? 1 : 0
     const rowCount = labelLines + legendLines
-    const titleBlockHeight = rowCount > 0
-        ? Math.ceil(30 + options.fontSize + Math.max(0, rowCount - 1) * lineStep)
-        : 0
+    const titleBlockHeight = rowCount > 0 ? 30 + effectiveFontSize + Math.max(0, rowCount - 1) * lineStep : 0
     const viewHeight = options.height - titleBlockHeight
     const padding = 80
     const availWidth = options.width - padding * 2
     const availHeight = viewHeight - padding * 2
+    // #region agent log
+    fetch(DEBUG_INGEST_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': DEBUG_SESSION_ID },
+        body: JSON.stringify({
+            sessionId: DEBUG_SESSION_ID,
+            runId: process.env.DEBUG_RUN_ID ?? 'pre-fix',
+            hypothesisId: 'H4-titleblock-centering',
+            location: 'lib/svg-renderer.ts:getSvgViewportMetrics',
+            message: 'Viewport metrics including title-block impact',
+            data: {
+                viewType,
+                showLabels: options.showLabels,
+                showLegend: options.showLegend,
+                hasDevices,
+                hasWall,
+                hasSlabs,
+                labelLines,
+                legendLines,
+                titleBlockHeight,
+                viewHeight,
+                availWidth,
+                availHeight,
+            },
+            timestamp: Date.now(),
+        }),
+    }).catch(() => {})
+    // #endregion
     return { titleBlockHeight, viewHeight, padding, availWidth, availHeight }
 }
 
@@ -3486,9 +3635,13 @@ function generateSVGString(
         currentViewType
     )
 
-    const fitBounds =
+    const fitBoundsFromGeometry =
         getBoundsFromProjectedGeometry(fitGeometry?.edges ?? edges, fitGeometry?.polygons ?? polygons)
         ?? getBoundsFromProjectedGeometry(edges, polygons)
+    const fitBounds =
+        isPlanView && renderMeta.planProjectedViewBounds
+            ? renderMeta.planProjectedViewBounds
+            : fitBoundsFromGeometry
 
     // In elevation, layer < 0 draws contextual fills behind the door; those layers must
     // skip fitBounds clipping so host backdrops can extend. In plan, nearby door/window
@@ -3705,7 +3858,12 @@ function renderTitleBlock(
         showLabels,
         backgroundColor,
     } = options
-    const padding = 15
+    const planUiScale =
+        viewType === 'Plan'
+            ? Math.max(0.25, Math.min(1, Math.min(options.width / 1000, options.height / 500)))
+            : 1
+    const effectiveFontSize = fontSize * planUiScale
+    const padding = 15 * planUiScale
     const startY = fullHeight - blockHeight
 
     // Title Block container (slightly darker background)
@@ -3719,10 +3877,10 @@ function renderTitleBlock(
     <rect x="0" y="${separatorY}" width="${fullWidth}" height="${blockHeight}" fill="${backgroundColor}" fill-opacity="0.5"/>
 `
 
-    let currentY = startY + padding + fontSize
+    let currentY = startY + padding + effectiveFontSize
     const leftX = padding
     /** Vertikaler Abstand zwischen aufeinanderfolgenden Textzeilen (eine Zeile = nächste Baseline). */
-    const lineStep = fontSize * 1.5
+    const lineStep = effectiveFontSize * 1.5
 
     // Translate View Type
     const viewTypeMap: Record<string, string> = {
@@ -3734,13 +3892,13 @@ function renderTitleBlock(
 
     // 1. View Title (Typ-/ID-Zeile bewusst weggelassen)
     if (showLabels) {
-        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" font-weight="bold" fill="#000000">${localizedViewType}</text>`
+        content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${effectiveFontSize}" font-weight="bold" fill="#000000">${localizedViewType}</text>`
         currentY += lineStep
 
         // 2. Opening Direction (if valid) — links wie Anschriftstitel
         if (context.openingDirection && (viewType === 'Front' || viewType === 'Back')) {
             const dirText = escapeSvgText(formatOpeningDirection(context.openingDirection))
-            content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">Öffnungsrichtung: ${dirText}</text>`
+            content += `    <text x="${leftX}" y="${currentY}" font-family="${fontFamily}" font-size="${effectiveFontSize}" fill="#000000">Öffnungsrichtung: ${dirText}</text>`
             currentY += lineStep
         }
     }
@@ -3774,10 +3932,10 @@ function renderTitleBlock(
 
         for (const item of items) {
             // Box (swatch matches text cap height visually)
-            content += `    <rect x="${legendX}" y="${currentY - fontSize + 2}" width="${fontSize}" height="${fontSize}" fill="${item.color}"/>`
+            content += `    <rect x="${legendX}" y="${currentY - effectiveFontSize + (2 * planUiScale)}" width="${effectiveFontSize}" height="${effectiveFontSize}" fill="${item.color}"/>`
             // Text
-            content += `    <text x="${legendX + fontSize + 5}" y="${currentY}" font-family="${fontFamily}" font-size="${fontSize}" fill="#000000">${item.text}</text>`
-            legendX += fontSize + item.text.length * (fontSize * 0.7) + 20
+            content += `    <text x="${legendX + effectiveFontSize + (5 * planUiScale)}" y="${currentY}" font-family="${fontFamily}" font-size="${effectiveFontSize}" fill="#000000">${item.text}</text>`
+            legendX += effectiveFontSize + item.text.length * (effectiveFontSize * 0.7) + (20 * planUiScale)
         }
     }
 
@@ -4293,12 +4451,32 @@ export async function renderDoorPlanSVG(
     /** When rendering with `renderDoorViews`, pass front elevation scale so plan matches Vorderansicht. */
     sharedScaleFromFront?: number
 ): Promise<string> {
-    const merged = normalizeRenderOptions(options)
-    const opts: Required<SVGRenderOptions> = {
-        ...merged,
-        height: planSvgCanvasHeight(merged.width),
-    }
+    const opts: Required<SVGRenderOptions> = { ...normalizeRenderOptions(options), height: planSvgCanvasHeight(options.width || 1000) }
     const { width: doorWidth, thickness: doorThickness, height: doorHeight } = context.viewFrame
+    // #region agent log
+    fetch(DEBUG_INGEST_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': DEBUG_SESSION_ID },
+        body: JSON.stringify({
+            sessionId: DEBUG_SESSION_ID,
+            runId: process.env.DEBUG_RUN_ID ?? 'pre-fix',
+            hypothesisId: 'H1-canvas-size',
+            location: 'lib/svg-renderer.ts:renderDoorPlanSVG',
+            message: 'Resolved plan canvas/options',
+            data: {
+                configuredWidth: options.width ?? null,
+                configuredHeight: options.height ?? null,
+                resolvedWidth: opts.width,
+                resolvedHeight: opts.height,
+                planHeightRatio: PLAN_SVG_HEIGHT_RATIO,
+                doorWidth,
+                doorThickness,
+                doorHeight,
+            },
+            timestamp: Date.now(),
+        }),
+    }).catch(() => {})
+    // #endregion
 
     // Check if we have detailed geometry
     const hasDetailedGeometry = context.detailedGeometry && context.detailedGeometry.doorMeshes.length > 0
@@ -4887,8 +5065,13 @@ function renderPlanFromMeshes(
     const frame = context.viewFrame
     const cutHeight = frame.origin.y - frame.height / 2 + 1.2
     const margin = Math.max(opts.margin, 0.5)
+    const halfW = frame.width / 2
+    const halfT = frame.thickness / 2
+    const planCropM = Math.max(opts.planCropMarginMeters, 0)
     const frustumWidth = frame.width + margin * 2
     const frustumHeight = frame.width * 2 + frame.thickness + margin * 2
+    const fitW = halfW + planCropM
+    const fitD = halfT + planCropM
 
     const camera = new THREE.OrthographicCamera(
         -frustumWidth / 2, frustumWidth / 2, frustumHeight / 2, -frustumHeight / 2, 0.1, 100
@@ -4904,9 +5087,6 @@ function renderPlanFromMeshes(
 
     const showPlanSwing = shouldRenderPlanSwing(frame)
     const flipArc = showPlanSwing ? shouldFlipPlanArc(context, frame) : false
-    const halfW = frame.width / 2
-    const halfT = frame.thickness / 2
-    const planCropM = Math.max(opts.planCropMarginMeters, 0)
 
     const projectPlanRect = (depthMin: number, depthMax: number, widthHalfLocal: number): ProjectedBounds => {
         const corners = [
@@ -4934,14 +5114,38 @@ function renderPlanFromMeshes(
     const hasSwingArc = showPlanSwing && arcParams?.type === 'swing' && !!arcParams.hingeSide
     const openAxisFit = flipArc ? frame.semanticFacing.clone().negate() : frame.semanticFacing.clone()
     const arcReach = hasSwingArc ? getPlanSwingReach(context, frame) : frame.thickness / 2
+    // #region agent log
+    fetch(DEBUG_INGEST_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': DEBUG_SESSION_ID },
+        body: JSON.stringify({
+            sessionId: DEBUG_SESSION_ID,
+            runId: process.env.DEBUG_RUN_ID ?? 'pre-fix',
+            hypothesisId: 'H3-context-crop-window',
+            location: 'lib/svg-renderer.ts:renderPlanFromMeshes',
+            message: 'Plan crop/fit extents around door',
+            data: {
+                margin,
+                planCropM,
+                halfW,
+                halfT,
+                fitW,
+                fitD,
+                hasSwingArc,
+                arcReach,
+                frustumWidth,
+                frustumHeight,
+            },
+            timestamp: Date.now(),
+        }),
+    }).catch(() => {})
+    // #endregion
 
     const fitPoint = (p: THREE.Vector3): ProjectedEdge => {
         const proj = projectPoint(p, camera, frustumWidth, frustumHeight)
         return { x1: proj.x, y1: proj.y, x2: proj.x, y2: proj.y, color: 'none', depth: 0, layer: 0 }
     }
 
-    const fitW = halfW + planCropM
-    const fitD = halfT + planCropM
     const fitGeometry = {
         edges: [
             fitPoint(frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(-fitW)).add(frame.semanticFacing.clone().multiplyScalar(-fitD))),
@@ -4954,7 +5158,13 @@ function renderPlanFromMeshes(
         polygons: [],
     }
 
-    const planViewportClip = getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
+    const planViewportClip = getViewportClipBounds(
+        fitGeometry,
+        opts,
+        context,
+        sharedDrawingScale,
+        'Plan'
+    )
 
     const renderGeometry = collectProjectedGeometry(
         doorMeshes,
@@ -4970,20 +5180,21 @@ function renderPlanFromMeshes(
         DOOR_EDGE_STROKE_FACTOR
     )
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
-    const nearbyDoorGeometryRaw = createSemanticPlanNearbyDoorGeometry(context, camera, frustumWidth, frustumHeight, cutHeight)
-    const nearbyWindowGeometryRaw = createSemanticPlanNearbyWindowGeometry(context, camera, frustumWidth, frustumHeight, cutHeight)
-    const nearbyDoorGeometry = planViewportClip
-        ? clipProjectedGeometryToBounds(nearbyDoorGeometryRaw, planViewportClip)
-        : nearbyDoorGeometryRaw
-    const nearbyWindowGeometry = planViewportClip
-        ? clipProjectedGeometryToBounds(nearbyWindowGeometryRaw, planViewportClip)
-        : nearbyWindowGeometryRaw
+    const nearbyOpeningsRaw = createPlanNearbyOpeningsGeometry(
+        context,
+        camera,
+        frustumWidth,
+        frustumHeight,
+        cutHeight,
+        opts
+    )
+    const nearbyOpeningsGeometry = planViewportClip
+        ? clipProjectedGeometryToBounds(nearbyOpeningsRaw, planViewportClip)
+        : nearbyOpeningsRaw
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
-    renderGeometry.edges.push(...nearbyDoorGeometry.edges)
-    renderGeometry.polygons.push(...nearbyDoorGeometry.polygons)
-    renderGeometry.edges.push(...nearbyWindowGeometry.edges)
-    renderGeometry.polygons.push(...nearbyWindowGeometry.polygons)
+    renderGeometry.edges.push(...nearbyOpeningsGeometry.edges)
+    renderGeometry.polygons.push(...nearbyOpeningsGeometry.polygons)
 
     if (showPlanSwing && context.openingDirection) {
         const arcEdges = calculateSwingArcEdges(context, frame, camera, frustumWidth, frustumHeight, cutHeight, flipArc)
@@ -5022,7 +5233,13 @@ function renderPlanFromMeshes(
     const hostGeometry = (planWallGeometry.edges.length > 0 || planWallGeometry.polygons.length > 0)
         ? clipProjectedGeometryToBounds(
             planWallGeometry,
-            getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
+            getViewportClipBounds(
+                fitGeometry,
+                opts,
+                context,
+                sharedDrawingScale,
+                'Plan'
+            )
         )
         : { edges: [], polygons: [] }
     renderGeometry.edges.push(...hostGeometry.edges)
@@ -5058,7 +5275,7 @@ function renderPlanFromBoundingBox(
 ): string {
     const { width: svgWidth, height: svgHeight, lineWidth, lineColor, doorColor, wallColor, backgroundColor, showLabels, fontSize, fontFamily } = opts
 
-    const padding = 60
+    const padding = 80
     const labelHeight = showLabels ? fontSize * 4 + 72 : 0
     const availableWidth = svgWidth - padding * 2
     const availableHeight = svgHeight - padding * 2 - labelHeight

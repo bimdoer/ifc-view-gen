@@ -40,6 +40,8 @@ next-env.d.ts
 *.png
 *.log
 guid.json
+*.webp
+*.xlsx
 
 20251230_test-prototyp.pdf
 Antworten auf Fragen in Feedback.md

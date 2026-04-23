@@ -22,6 +22,7 @@
  *   node scripts/test-plan-door-visibility-runner.js -- --door-guid=…
  *
  * Erzeugte Grundriss-SVGs: nur bei gesetztem IFC → `test-output/plan-door-visibility/<guid>-plan.svg`
+ * und optional (Konfig/CLI) → `test-output/plan-door-visibility/<guid>_plan.webp` (sharp).
  */
 import * as assert from 'node:assert/strict'
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
@@ -30,6 +31,7 @@ import * as THREE from 'three'
 import { analyzeDoors, loadDetailedGeometry, type DoorContext } from '../lib/door-analyzer'
 import type { ElementInfo, LoadedIFCModel } from '../lib/ifc-types'
 import { extractDoorAnalyzerSidecarMaps, loadIFCModelWithMetadata } from '../lib/ifc-loader'
+import { writeSvgStringAsWebp } from '../lib/svg-to-webp-file'
 import { renderDoorPlanSVG, type SVGRenderOptions } from '../lib/svg-renderer'
 
 const PLAN_SVG_OUTPUT_DIR = resolve(process.cwd(), 'test-output', 'plan-door-visibility')
@@ -77,6 +79,9 @@ function savePlanSvgFile(fileName: string, svg: string): string {
 // `doorGuidsFile` werden für die Auswahl ignoriert (sinnvoll, wenn die Datei leer/nicht
 // gespeichert ist oder die Liste unvollständig).
 //
+// `showLegend` / `showLabels` / `writeWebp` (optional, Standard s. Objekt): Grundriss-Titelblock
+// und WebP-Export. Per CLI: `--no-legend`, `--no-labels`, `--no-webp`.
+//
 // Je zwei Zeilen: genau **eine** von `doorGuids` und genau **eine** von `doorGuidsFile`
 // aktiv lassen; die andere jeweils auskommentieren. Fehlt `doorGuids` im Objekt (beide
 // Zeilen auskommentiert), gilt wie `[]` — dann nur GUIDs aus der Datei (wenn vorhanden).
@@ -85,13 +90,13 @@ const USER_PLAN_VISIBILITY_CONFIG = {
     architectureIfc: resolve(process.cwd(), 'scripts', 'Flu21_A_AR_51_ARM_0000_A-AR-0000-0001_260421.ifc'),
     electricalIfc: resolve(process.cwd(), 'scripts', 'Flu21_A_EL_51_ELM_0000_A-EL-2300-0001_IFC Elektro.ifc'),
 
-    doorGuids: [],
+    doorGuids: ['0HQZhZFdqXIwjzDgrVSwj5','2wlA$J1j_AGvOU8swNH3xo','1vxXWElwljJPBHOg5wmNvz'],
 
     /** Einzeltür testen: z. B. `doorGuids: ['1deFxoCcbbI816DRLMaWcI']` + `doorGuidsFile: null` */
     // doorGuids: ['1deFxoCcbbI816DRLMaWcI'],
     // doorGuidsFile: null,
 
-    doorGuidsFile: resolve(process.cwd(), 'scripts', 'guid.json'),
+    doorGuidsFile: null,//resolve(process.cwd(), 'scripts', 'guid.json'),
     /**
      * Bei gesetztem Arch-IFC + GUIDs: `true` = synthetischen In-Memory-Test überspringen,
      * nur IFC rendern und SVGs schreiben. `false` = zusätzlich Synthetik testen (weiterhin keine synthetic-.svg).
@@ -101,25 +106,66 @@ const USER_PLAN_VISIBILITY_CONFIG = {
     strictDoorGuids: false,
     /** `true`: alle IfcDoor des Arch-IFC als SVG; ignoriert doorGuids / doorGuidsFile für die Auswahl. */
     useAllIfcDoors: false,
+
+    /** Legende im Titelblock (Farbfelder Tür/Wand/…, wenn sichtbar). */
+    showLegend: true,
+    /** Titelblock: Ansichtstyp „Grundriss“, ggf. weitere Zeilen. */
+    showLabels: true,
+    /** Zusätzlich GUID_plan.webp neben dem SVG (devDependency: sharp). */
+    writeWebp: true,
+    /** WebP-Qualität 1–100 für `writeWebp`. */
+    webpQuality: 92,
+    /** SVG-Rasterisierungs-DPI (Text/Legende schärfer bei höheren Werten). */
+    webpDensity: 300,
 }
 
 type BBox2D = { minX: number; minY: number; maxX: number; maxY: number }
 
-const defaultRenderOptions = (): SVGRenderOptions => ({
+const defaultRenderOptionsBase = (): Omit<SVGRenderOptions, 'showLegend' | 'showLabels'> => ({
     width: 1000,
     height: 1000,
     margin: 0.5,
+    planCropMarginMeters: 0.5,
     doorColor: '#dedede',
     wallColor: '#e3e3e3',
     deviceColor: '#fcc647',
     lineColor: '#000000',
     lineWidth: 1.5,
     showFills: true,
-    showLegend: false,
-    showLabels: false,
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
 })
+
+type PlanTestRenderAndOutput = {
+    svg: SVGRenderOptions
+    writeWebp: boolean
+    webpQuality: number
+    webpDensity: number
+}
+
+function resolvePlanTestRenderAndOutput(argv: string[]): PlanTestRenderAndOutput {
+    const u = USER_PLAN_VISIBILITY_CONFIG
+    const noLegend = argv.includes('--no-legend')
+    const noLabels = argv.includes('--no-labels')
+    const noWebp = argv.includes('--no-webp')
+    const showLegend = !noLegend && u.showLegend !== false
+    const showLabels = !noLabels && u.showLabels !== false
+    const writeWebp = !noWebp && u.writeWebp !== false
+    const webpQuality = Number.isFinite(u.webpQuality) ? u.webpQuality : 92
+    const webpDensity = Number.isFinite(u.webpDensity) ? u.webpDensity : 300
+
+    const resolved = {
+        svg: {
+            ...defaultRenderOptionsBase(),
+            showLegend,
+            showLabels,
+        },
+        writeWebp,
+        webpQuality,
+        webpDensity,
+    }
+    return resolved
+}
 
 function createMesh(expressID: number, geometry: THREE.BufferGeometry): THREE.Mesh {
     geometry.computeBoundingBox()
@@ -430,7 +476,10 @@ IFC-Pfade: USER_PLAN_VISIBILITY_CONFIG in dieser Datei.
 Tür-GUIDs: wie oben, oder doorGuids + optional doorGuidsFile in der Datei (wird ignoriert, wenn Override gesetzt ist).
 strictDoorGuids: false = fehlende GUIDs überspringen, alle im IFC gefundenen Türen rendern.
 useAllIfcDoors: true = alle IfcDoor des Arch-IFC rendern (wird ignoriert, wenn door-guid-Override gesetzt ist).
-Mit Arch-IFC + GUIDs: echte Grundriss-SVGs → test-output/plan-door-visibility/
+  --no-legend  → Legende im SVG-Titelblock aus
+  --no-labels  → Titelblock-Texte (z. B. „Grundriss“) aus
+  --no-webp    → kein WebP; nur SVG (siehe showLegend / writeWebp in der Config)
+Mit Arch-IFC + GUIDs: echte Grundriss-SVGs → test-output/plan-door-visibility/ (optional WebP: GUID_plan.webp)
 Ohne IFC: nur kurzer In-Memory-Synthetiktest (keine SVG-Datei).`)
     process.exit(0)
 }
@@ -563,11 +612,10 @@ function describeMissingDoorGuids(
     return parts.join(' ')
 }
 
-async function runSyntheticCase(): Promise<void> {
-    const options = defaultRenderOptions()
+async function runSyntheticCase(svgOptions: SVGRenderOptions): Promise<void> {
     const context = await buildSyntheticDoorWallContext()
-    const planSvg = await renderDoorPlanSVG(context, options)
-    assertPlanShowsDoorAndSurroundings(planSvg, options.doorColor!, options.wallColor!, 'synthetic door+wall')
+    const planSvg = await renderDoorPlanSVG(context, svgOptions)
+    assertPlanShowsDoorAndSurroundings(planSvg, svgOptions.doorColor!, svgOptions.wallColor!, 'synthetic door+wall')
     console.log('Synthetic plan door visibility: OK (in-memory only, no SVG file)')
 }
 
@@ -575,10 +623,11 @@ async function runIfcCasesForGuids(
     architectureIfcPath: string,
     electricalIfcPath: string | null,
     guids: string[],
-    opts?: { strictMissingGuids?: boolean; useAllIfcDoors?: boolean }
+    opts: { strictMissingGuids?: boolean; useAllIfcDoors?: boolean; render: PlanTestRenderAndOutput }
 ): Promise<void> {
-    const strictMissingGuids = opts?.strictMissingGuids !== false
-    const useAllIfcDoors = opts?.useAllIfcDoors === true
+    const strictMissingGuids = opts.strictMissingGuids !== false
+    const useAllIfcDoors = opts.useAllIfcDoors === true
+    const { svg: options, writeWebp, webpQuality, webpDensity } = opts.render
     assert.ok(
         guids.length > 0 || useAllIfcDoors,
         'Expected at least one door GUID, or useAllIfcDoors: true'
@@ -648,7 +697,6 @@ async function runIfcCasesForGuids(
 
     await loadDetailedGeometry(selected, archFile, new THREE.Vector3(0, 0, 0), elecFile)
 
-    const options = defaultRenderOptions()
     // IFC-Grundriss: Türblatt ist in der Projektion oft ein sehr schmales Rechteck
     // (Dicke << Breite); die Bounding Box aller #dedede-Füllungen bleibt klein (~15 px²
     // gemessen), während Wand und Kanten groß sind — minDoorArea daher niedriger als
@@ -668,6 +716,18 @@ async function runIfcCasesForGuids(
         const planSvg = await renderDoorPlanSVG(context, options)
         const safeId = sanitizeFilenameSegment(context.doorId)
         const written = savePlanSvgFile(`${safeId}-plan.svg`, planSvg)
+        let webpPath = ''
+        if (writeWebp) {
+            webpPath = resolve(PLAN_SVG_OUTPUT_DIR, `${safeId}_plan.webp`)
+            try {
+                await writeSvgStringAsWebp(planSvg, webpPath, { quality: webpQuality, density: webpDensity })
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e)
+                assert.fail(
+                    `WebP write failed for ${context.doorId} (${msg}). Install sharp: npm install -D sharp, or use --no-webp.`
+                )
+            }
+        }
         assertPlanShowsDoorAndSurroundings(
             planSvg,
             options.doorColor!,
@@ -675,13 +735,16 @@ async function runIfcCasesForGuids(
             `IFC guid=${context.doorId}`,
             relaxed
         )
-        console.log(`IFC plan door visibility (${context.doorId}): OK (SVG: ${written})`)
+        const webpInfo = writeWebp ? `, WebP: ${webpPath}` : ''
+        console.log(`IFC plan door visibility (${context.doorId}): OK (SVG: ${written}${webpInfo})`)
     }
 }
 
 async function main(): Promise<void> {
     const argv = process.argv.slice(2)
     maybePrintHelp(argv)
+
+    const planRenderOut = resolvePlanTestRenderAndOutput(argv)
 
     const archPath = resolveConfigPath(USER_PLAN_VISIBILITY_CONFIG.architectureIfc)
     const elecPath = resolveConfigPath(USER_PLAN_VISIBILITY_CONFIG.electricalIfc)
@@ -706,7 +769,7 @@ async function main(): Promise<void> {
         ifcConfigured && USER_PLAN_VISIBILITY_CONFIG.skipSyntheticWhenIfcConfigured !== false
 
     if (!skipSynthetic) {
-        await runSyntheticCase()
+        await runSyntheticCase(planRenderOut.svg)
     }
 
     const hasElecOnly = Boolean(elecPath) && !hasArch && guidList.length === 0 && !useAllIfcDoors
@@ -732,6 +795,7 @@ async function main(): Promise<void> {
         await runIfcCasesForGuids(archPath, elecPath, guidList, {
             strictMissingGuids: strictMissing,
             useAllIfcDoors,
+            render: planRenderOut,
         })
     }
 

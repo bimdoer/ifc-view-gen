@@ -11,6 +11,7 @@
     "test:door-host-geometry": "node scripts/test-door-host-geometry-runner.js",
     "test:door-wall-context": "node scripts/test-door-wall-context-runner.js",
     "test:plan-door-visibility": "node scripts/test-plan-door-visibility-runner.js",
+    "upload:plan-webp-airtable": "node scripts/upload-plan-webp-to-airtable-runner.js",
     "analyze:door-plan-context": "node scripts/analyze-door-plan-context-runner.js",
     "generate:svg-font-embed": "node scripts/generate-inter-svg-font-embed.mjs",
     "setup-wasm": "node scripts/copy-postinstall-assets.mjs",
@@ -39,6 +40,7 @@
     "@types/react-dom": "^18.3.0",
     "@types/three": "^0.182.0",
     "dotenv": "^17.2.3",
+    "sharp": "^0.34.5",
     "ts-node": "^10.9.2",
     "typescript": "^5.5.0"
   }
