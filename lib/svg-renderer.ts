@@ -37,6 +37,8 @@ export interface SVGRenderOptions {
     glassColor?: string
     /** Fill for safety/alarm devices (Rauchmelder, Notleuchte, …). Classified by `isSafetyDeviceName`. */
     safetyColor?: string
+    /** Fill for IfcCovering.CEILING. (abgehängte Decke / suspended ceiling). Defaults to `elevation.suspendedCeiling`. */
+    suspendedCeilingColor?: string
     /** Opacity for glazing fills in Ansichten (0–1); ignored im Grundriss (gleiche Opacity wie übrige Türfläche). */
     glassFillOpacity?: number
     backgroundColor?: string // Background color for area outside door
@@ -110,6 +112,7 @@ const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     deviceColor: COLORS.plan.electrical,
     glassColor: COLORS.elevation.glass,
     safetyColor: COLORS.plan.safety,
+    suspendedCeilingColor: COLORS.elevation.suspendedCeiling,
     glassFillOpacity: 0.32,
     backgroundColor: '#fff',
     lineWidth: 1.5,
@@ -1967,7 +1970,7 @@ function createSemanticElevationCeilingGeometry(
         // ceiling at a layer ABOVE the door mesh (door uses layer 0) with
         // opaque fill so the door's outer silhouette verticals terminate at
         // the ceiling's lower edge instead of cutting through it.
-        appendProjectedFillPolygon(geometry, corners, camera, width, height, options.floorSlabColor, 2, 1)
+        appendProjectedFillPolygon(geometry, corners, camera, width, height, options.suspendedCeilingColor, 2, 1)
         // Only the horizontal top+bottom edges are real silhouette lines; the
         // vertical side edges are per-ceiling bbox artefacts (two IfcCoverings
         // meeting above the door) and print as phantom verticals at door-width.
