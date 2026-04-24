@@ -2174,13 +2174,20 @@ function createProjectedElevationWallBackdropGeometry(
     const wallMinY = clipBounds.minY
     const wallMaxY = clipBounds.maxY
 
-    // Backdrop extends to the full clipBounds so wall panels and their
-    // outlines reach the picture edges. The wall-footprint clamp used to
-    // stop the fill at T-junctions / storefront ends, but that left white
-    // gutters at the canvas sides — we now prefer the "continuous wall to
-    // the picture edge" read.
-    const wallMinX = clipBounds.minX
-    const wallMaxX = clipBounds.maxX
+    // Clamp the backdrop's horizontal extent to the real wall footprint along
+    // the door's widthAxis. This stops the fill at T-junctions / L-corners /
+    // the end of a storefront instead of bleeding across the whole clip band
+    // into open space that has no actual wall behind it.
+    let wallMinX = clipBounds.minX
+    let wallMaxX = clipBounds.maxX
+    if (footprintLocalA) {
+        const leftPt = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(footprintLocalA.minA))
+        const rightPt = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(footprintLocalA.maxA))
+        const leftPx = projectPoint(leftPt, camera, width, height).x
+        const rightPx = projectPoint(rightPt, camera, width, height).x
+        wallMinX = Math.max(clipBounds.minX, Math.min(leftPx, rightPx))
+        wallMaxX = Math.min(clipBounds.maxX, Math.max(leftPx, rightPx))
+    }
 
     const doorBounds = projectElevationDoorBounds(frame, camera, width, height)
     // If the door pokes outside the wall footprint (shouldn't normally, but be
@@ -2660,30 +2667,85 @@ function createMeshPlanSectionGeometry(
         return out
     }
 
-    // Corridor matches plan crop margin: door ± pad in width and depth so section
-    // geometry exists inside the same window that fit/clip uses (not full IFC wall).
+    // Corridor: depth stays bounded to a narrow band around the host-wall
+    // plane (otherwise the section would include geometry metres away from
+    // the door along semanticFacing), but width is unbounded so the wall
+    // extends as far as the mesh reaches. The SVG viewBox is the only
+    // lateral crop — no synthetic closing line inside the drawing area.
     const frame = context.viewFrame
     const widthAxis = frame.widthAxis.clone().normalize()
     const depthAxis = frame.semanticFacing.clone().normalize()
-    const halfDoorWidth = frame.width / 2
     const halfT = frame.thickness / 2
     const planPad = Math.max(options.planCropMarginMeters, 0)
     const wallMetrics = getLocalHostWallPlanMetrics(context)
     const hostWallThickness = wallMetrics?.thickness ?? frame.thickness
-    const lateralExtend = halfDoorWidth + planPad
     const depthHalfSpan = Math.max(halfT, hostWallThickness / 2) + planPad
     const relDepthMin = -depthHalfSpan
     const relDepthMax = depthHalfSpan
-    const originWidth = frame.origin.dot(widthAxis)
     const originDepth = frame.origin.dot(depthAxis)
 
     const corridor: PlanSectionCorridor = {
         widthAxis,
         depthAxis,
-        minWidth: originWidth - halfDoorWidth - lateralExtend,
-        maxWidth: originWidth + halfDoorWidth + lateralExtend,
+        minWidth: Number.NEGATIVE_INFINITY,
+        maxWidth: Number.POSITIVE_INFINITY,
         minDepth: originDepth + relDepthMin,
         maxDepth: originDepth + relDepthMax,
+    }
+
+    // Under-fill: bbox-based rectangle spanning the host wall's full widthAxis
+    // extent, with the door opening cut out. web-ifc's boolean-cut often leaves
+    // only a narrow jamb slab in the mesh — the wall's real length (e.g. 52 m
+    // for a long partition) is in the vertex bounds but not in any triangle at
+    // the cut plane. This under-fill closes that gap so the wall reads as a
+    // continuous shape; mesh-sectioned edges + polygons still overlay on top.
+    const hostBounds = getHostWallAxisBounds(context, widthAxis, depthAxis, frame.upAxis)
+    if (hostBounds && context.hostWall) {
+        const halfDoorWidth = frame.width / 2
+        const originWidthAbs = frame.origin.dot(widthAxis)
+        const minWidthLocal = hostBounds.minA - originWidthAbs
+        const maxWidthLocal = hostBounds.maxA - originWidthAbs
+        const minDepthLocal = hostBounds.minB - originDepth
+        const maxDepthLocal = hostBounds.maxB - originDepth
+        const originCut = frame.origin.clone().add(
+            frame.upAxis.clone().multiplyScalar(cutY - frame.origin.y)
+        )
+        const markLastAsSkipClip = () => {
+            const lastPoly = out.polygons[out.polygons.length - 1]
+            if (lastPoly) lastPoly.skipClip = true
+            // Also flag the four edges the polygon emitted (last 4 entries).
+            for (let i = Math.max(0, out.edges.length - 4); i < out.edges.length; i++) {
+                out.edges[i].skipClip = true
+            }
+        }
+        // Left of door: bbox min to jamb
+        if (minWidthLocal < -halfDoorWidth) {
+            const leftRect = createRectPoints3D(
+                originCut,
+                widthAxis,
+                depthAxis,
+                minWidthLocal,
+                -halfDoorWidth,
+                minDepthLocal,
+                maxDepthLocal
+            )
+            appendProjectedPolygon(out, leftRect, camera, width, height, options.wallColor, options.lineColor, -2, 1, WALL_EDGE_STROKE_FACTOR)
+            markLastAsSkipClip()
+        }
+        // Right of door: jamb to bbox max
+        if (maxWidthLocal > halfDoorWidth) {
+            const rightRect = createRectPoints3D(
+                originCut,
+                widthAxis,
+                depthAxis,
+                halfDoorWidth,
+                maxWidthLocal,
+                minDepthLocal,
+                maxDepthLocal
+            )
+            appendProjectedPolygon(out, rightRect, camera, width, height, options.wallColor, options.lineColor, -2, 1, WALL_EDGE_STROKE_FACTOR)
+            markLastAsSkipClip()
+        }
     }
 
     for (const mesh of wallMeshes) {
@@ -3174,15 +3236,15 @@ function computeViewTransform(
         return { scale, offsetX, offsetY, viewHeight }
     }
 
-    // Elevations: FIXED scale (same px/m for every door), top-anchor with
-    // small breather, door horizontally centred. Picked so 4 m slab-to-slab
-    // content fits availHeight exactly; shorter storeys leave continuous-wall
-    // backdrop between the lower slab and the title block.
+    // Elevations: FIXED scale (same px/m for every door), content BOTTOM
+    // anchored to the title-block separator, door horizontally centred. Scale
+    // picked so 4 m slab-to-slab content fits availHeight exactly; shorter
+    // storeys show the real IFC geometry only — nothing fake added above.
     const scale = FIXED_PX_PER_METER
     const offsetX = doorAnchor
         ? options.width / 2 - (doorAnchor.x - fitBounds.minX) * scale
         : sidePad + (availWidth - contentWidth * scale) / 2
-    const offsetY = topPad
+    const offsetY = topPad + availHeight - contentHeight * scale
     return { scale, offsetX, offsetY, viewHeight }
 }
 
@@ -3312,12 +3374,13 @@ function getElevationHostClipBounds(
     bounds.minY = Math.min(projectedTop.y, projectedBottom.y)
     bounds.maxY = Math.max(projectedTop.y, projectedBottom.y)
 
-    // Extend the lateral clip to exactly half the canvas width at the fixed
-    // drawing scale, so host-wall panels and slab strips reach the picture's
-    // left/right edges. Falls back to a generous world window if the canvas
-    // width is unavailable here (shouldn't happen in practice).
-    const halfCanvasMetres = (options.width / 2) / FIXED_PX_PER_METER
-    const lateralGap = Math.max(halfCanvasMetres - frame.width / 2, 1.0)
+    // Clamp horizontal extent to a tight window around the door so long host
+    // walls, nearby-door bands or slab edges running across the storey cannot
+    // stretch the frustum horizontally. The lateral window is sized to still
+    // reveal an adjacent door + small wall reveal on each side (~1.5-2 m for
+    // a standard 1 m door, ~door-width either side for wide curtain-wall
+    // doors), but no further.
+    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5)
     const leftPoint = frame.origin.clone().add(
         frame.widthAxis.clone().multiplyScalar(-frame.width / 2 - lateralGap)
     )
@@ -3328,8 +3391,12 @@ function getElevationHostClipBounds(
     const projectedRight = projectPoint(rightPoint, camera, width, height)
     const lateralMin = Math.min(projectedLeft.x, projectedRight.x)
     const lateralMax = Math.max(projectedLeft.x, projectedRight.x)
-    bounds.minX = lateralMin
-    bounds.maxX = lateralMax
+    bounds.minX = Math.max(bounds.minX, lateralMin)
+    bounds.maxX = Math.min(bounds.maxX, lateralMax)
+    if (bounds.minX >= bounds.maxX) {
+        bounds.minX = lateralMin
+        bounds.maxX = lateralMax
+    }
     return bounds
 }
 
@@ -3953,26 +4020,10 @@ function generateSVGString(
     </clipPath>
   </defs>
 `
-    // Fill the strip ABOVE content (top-pad breather) and BELOW content
-    // (for short storeys, the gap between the lower slab and the title
-    // block) with wall colour so elevations read as continuous wall to
-    // both picture edges. Plan view stays on the standard background.
-    let elevationBackdropFill = ''
-    if (!isPlanView && currentViewType !== '' && Number.isFinite(minX)) {
-        const contentTop = offsetY
-        const contentBottom = offsetY + (maxY - minY) * scale
-        if (contentTop > 0.5) {
-            elevationBackdropFill += `  <rect x="0" y="0" width="${width}" height="${contentTop.toFixed(2)}" fill="${options.wallColor}"/>\n`
-        }
-        if (viewHeight - contentBottom > 0.5) {
-            elevationBackdropFill += `  <rect x="0" y="${contentBottom.toFixed(2)}" width="${width}" height="${(viewHeight - contentBottom).toFixed(2)}" fill="${options.wallColor}"/>\n`
-        }
-    }
-
     let svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
 ${fontDefs}${drawingClipDefs}  <rect width="100%" height="100%" fill="${backgroundColor}"/>
-${elevationBackdropFill}  <g id="fills">
+  <g id="fills">
   <g clip-path="url(#drawing-clip)">
 ${wallBandsSvg}
 `
