@@ -2118,18 +2118,7 @@ function findNearbyWalls(
             if (!rangesOverlap(upRange.min, upRange.max, upBandMin, upBandMax)) {
                 return null
             }
-            // Walls that are clearly perpendicular to the host (short along the
-            // door's widthAxis, long along semanticFacing) still bound the door's
-            // room even when they attach to a parallel wall 2 m behind the host
-            // — e.g. a small vestibule. Relax their depth band to 3 m so those
-            // sibling perpendicular walls show up in elevation. Parallel walls
-            // keep the tight 1.2 m band.
-            const widthExtent = widthRange.max - widthRange.min
-            const depthExtent = depthRange.max - depthRange.min
-            const isPerpendicularShape = depthExtent > widthExtent * 2
-            const effDepthBandMin = isPerpendicularShape ? originDepth - 3.0 : depthBandMin
-            const effDepthBandMax = isPerpendicularShape ? originDepth + 3.0 : depthBandMax
-            if (!rangesOverlap(depthRange.min, depthRange.max, effDepthBandMin, effDepthBandMax)) {
+            if (!rangesOverlap(depthRange.min, depthRange.max, depthBandMin, depthBandMax)) {
                 return null
             }
 
