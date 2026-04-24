@@ -1372,6 +1372,14 @@ function findHostWall(
     const expandedDoorBbox = door.boundingBox.clone()
     expandedDoorBbox.expandByScalar(threshold)
 
+    // Reject walls that extend > 0.6 m along the door's normal. A proper host
+    // wall is thin in that direction (standard interior walls are 0.1–0.3 m,
+    // thick party walls up to ~0.5 m). A wall that's several metres thick in
+    // the door's normal direction is almost always a perpendicular wall whose
+    // end-face happens to abut the door jamb — picking it as "host" flips the
+    // elevation axes.
+    const doorNormal = calculateElementNormal(door)
+
     let closestWall: ElementInfo | null = null
     let bestOverlapScore = 0
 
@@ -1381,8 +1389,10 @@ function findHostWall(
         // Check if door intersects with wall bounding box
         if (!expandedDoorBbox.intersectsBox(wall.boundingBox)) continue
 
-        const wallCenter = wall.boundingBox.getCenter(new THREE.Vector3())
         const wallSize = wall.boundingBox.getSize(new THREE.Vector3())
+        const wallExtentAlongDoorNormal = measureBoxAlongAxis(wall.boundingBox, doorNormal)
+        const wallThicknessAlongDoorNormal = wallExtentAlongDoorNormal.max - wallExtentAlongDoorNormal.min
+        if (wallThicknessAlongDoorNormal > 0.6) continue
 
         // Calculate overlap volume/area
         const intersection = expandedDoorBbox.clone().intersect(wall.boundingBox)
@@ -2108,7 +2118,18 @@ function findNearbyWalls(
             if (!rangesOverlap(upRange.min, upRange.max, upBandMin, upBandMax)) {
                 return null
             }
-            if (!rangesOverlap(depthRange.min, depthRange.max, depthBandMin, depthBandMax)) {
+            // Walls that are clearly perpendicular to the host (short along the
+            // door's widthAxis, long along semanticFacing) still bound the door's
+            // room even when they attach to a parallel wall 2 m behind the host
+            // — e.g. a small vestibule. Relax their depth band to 3 m so those
+            // sibling perpendicular walls show up in elevation. Parallel walls
+            // keep the tight 1.2 m band.
+            const widthExtent = widthRange.max - widthRange.min
+            const depthExtent = depthRange.max - depthRange.min
+            const isPerpendicularShape = depthExtent > widthExtent * 2
+            const effDepthBandMin = isPerpendicularShape ? originDepth - 3.0 : depthBandMin
+            const effDepthBandMax = isPerpendicularShape ? originDepth + 3.0 : depthBandMax
+            if (!rangesOverlap(depthRange.min, depthRange.max, effDepthBandMin, effDepthBandMax)) {
                 return null
             }
 
@@ -2456,6 +2477,12 @@ export async function analyzeDoors(
     // silently ignored (those are almost always stray / modelling artefacts).
     const processElements = (elements: ElementInfo[], isSecondary: boolean) => {
         for (const element of elements) {
+            // Furniture elements (IfcFurniture, IfcSystemFurnitureElement) are
+            // interior fit-out — cabinets, lockers, airlocks — that must never
+            // appear in door technical drawings. Exclude them even if some
+            // other IFC relationship would otherwise pull them in.
+            const upper = (element.typeName ?? '').toUpperCase()
+            if (upper.includes('FURNITURE') || upper.includes('FURNISHING')) continue
             if (isDoorType(element.typeName, element.ifcType)) {
                 doors.push(element)
             } else if (isWindowType(element.typeName, element.ifcType)) {

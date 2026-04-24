@@ -4430,10 +4430,17 @@ function filterContextForElevationOcclusion(
     }
 
     /**
-     * Classify a bbox against the wall plane:
-     *  - returns -1 if entirely on the -normal side (back-room side)
-     *  - returns +1 if entirely on the +normal side (front-room side)
-     *  - returns  0 if it straddles the plane within tolerance
+     * Classify a bbox against the wall plane.
+     *  -1 / +1 = mostly on that side, drop on the opposite view.
+     *   0     = truly straddling (wall aggregate, door sub-mesh) — keep both.
+     *
+     * We use the bbox CENTER as the dominant side: an element that attaches to
+     * the host wall and extends 2 m into one room (e.g. a Promat beam above
+     * the door) is architecturally on that side, not straddling. The bbox
+     * would touch the plane at its attachment face, which previously forced
+     * "straddles" and showed the element on both elevations. Keep the
+     * straddle band tight so only geometry that genuinely lives inside the
+     * wall (aggregate parts / door frame) falls through as 0.
      */
     const classifyBbox = (bbox: THREE.Box3 | null | undefined): number | null => {
         if (!bbox) return null
@@ -4445,8 +4452,9 @@ function filterContextForElevationOcclusion(
             if (s > sideMax) sideMax = s
         }
         if (!Number.isFinite(sideMin)) return null
-        if (sideMax < -tol) return -1
-        if (sideMin > +tol) return +1
+        const center = (sideMin + sideMax) / 2
+        if (center > +tol) return +1
+        if (center < -tol) return -1
         return 0
     }
 
