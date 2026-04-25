@@ -13,6 +13,7 @@
     "test:plan-door-visibility": "node scripts/test-plan-door-visibility-runner.js",
     "upload:plan-webp-airtable": "node scripts/upload-plan-webp-to-airtable-runner.js",
     "analyze:door-plan-context": "node scripts/analyze-door-plan-context-runner.js",
+    "generate:door-bcf": "node scripts/generate-door-bcf-runner.js",
     "airtable:setup": "node scripts/setup-airtable.js",
     "airtable:import-doors": "node scripts/import-doors-to-airtable.js",
     "round": "node scripts/airtable-render-round-runner.js",
