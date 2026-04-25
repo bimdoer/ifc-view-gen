@@ -50,6 +50,10 @@ interface RenderColorsConfig {
     safety?: {
         layerKeywords?: string[]
     }
+    /** Devices on these layers are dropped entirely (furniture/decoration). */
+    hide?: {
+        layerKeywords?: string[]
+    }
     strokes: {
         outline: string
     }
@@ -146,6 +150,9 @@ export interface RenderColors {
     safety: {
         layerKeywords: readonly string[]
     }
+    hide: {
+        layerKeywords: readonly string[]
+    }
     strokes: {
         outline: string
     }
@@ -160,6 +167,9 @@ function resolveColors(config: RenderColorsConfig): RenderColors {
         drywall: map?.drywall ? P(map.drywall) : P(fallback),
     })
     const layerKeywords = (config.safety?.layerKeywords ?? FALLBACK_CONFIG.safety!.layerKeywords!)
+        .map((k) => k.toLowerCase())
+        .filter((k) => k.length > 0)
+    const hideLayerKeywords = (config.hide?.layerKeywords ?? [])
         .map((k) => k.toLowerCase())
         .filter((k) => k.length > 0)
     return {
@@ -192,6 +202,9 @@ function resolveColors(config: RenderColorsConfig): RenderColors {
         },
         safety: {
             layerKeywords,
+        },
+        hide: {
+            layerKeywords: hideLayerKeywords,
         },
         strokes: {
             outline: P(config.strokes.outline),
@@ -352,4 +365,25 @@ export function isSafetyDevice(
 ): boolean {
     if (isSafetyDeviceByLayer(layers, colors)) return true
     return isSafetyDeviceName(name)
+}
+
+/**
+ * True when an element's layer assignments include a `hide.layerKeywords`
+ * entry — used to drop furniture / decoration (`02 Mobilier décoration`,
+ * Möbel Einrichtung) from elevation + plan renders without the door
+ * pipeline accidentally picking them up as electrical context.
+ */
+export function isHiddenByLayer(
+    layers: readonly string[] | null | undefined,
+    colors: RenderColors = loadRenderColors()
+): boolean {
+    if (!layers || layers.length === 0) return false
+    const keywords = colors.hide.layerKeywords
+    if (keywords.length === 0) return false
+    for (const layer of layers) {
+        if (!layer) continue
+        const lower = layer.toLowerCase()
+        if (keywords.some((kw) => lower.includes(kw))) return true
+    }
+    return false
 }

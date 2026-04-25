@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import type { ElementInfo, LoadedIFCModel } from './ifc-types'
 import * as WebIFC from 'web-ifc'
+import { isHiddenByLayer } from './color-config'
 import type { DoorCsetStandardCHData, DoorLeafMetadata, WallCsetStandardCHData } from './ifc-loader'
 
 /** Parts from `extractWallAggregateParts` may have no `LoadedIFCModel.elements` entry (fragments scope); geometry still loads by expressID. */
@@ -2793,6 +2794,18 @@ export async function analyzeDoors(
                 const layers = deviceLayerMap.get(device.expressID)
                 if (layers && layers.length > 0) devLayers.set(device.expressID, layers)
             }
+        }
+
+        // Drop furniture / decoration devices (`02 Mobilier décoration`,
+        // Möbel Einrichtung) — they leak into elevations as orange rects
+        // because the elec/arch extractors don't separate furniture from
+        // electrical fixtures. Filter by layer keyword so any model that
+        // names its furniture layer accordingly is hidden.
+        if (devLayers.size > 0) {
+            context.nearbyDevices = context.nearbyDevices.filter((device) => {
+                const layers = devLayers.get(device.expressID)
+                return !isHiddenByLayer(layers ?? null)
+            })
         }
     }
 

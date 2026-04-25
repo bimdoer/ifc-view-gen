@@ -1094,8 +1094,8 @@ function getStructuralSlabFaceDy(
     const slabs = direction === 'above' ? context.hostSlabsAbove : context.hostSlabsBelow
     const originB = frame.origin.dot(frame.upAxis)
     let best: number | null = null
+    let partFallback: number | null = null
     for (const slab of slabs) {
-        if ((slab.typeName || '').toUpperCase() === 'IFCBUILDINGELEMENTPART') continue
         if (!slab.boundingBox) continue
         const slabBounds = measureBoundingBoxInAxes(
             slab.boundingBox,
@@ -1103,6 +1103,26 @@ function getStructuralSlabFaceDy(
             frame.upAxis,
             frame.semanticFacing
         )
+        const isPart = (slab.typeName || '').toUpperCase() === 'IFCBUILDINGELEMENTPART'
+        if (isPart) {
+            // -1UG and similar storeys can have hostSlabsAbove/Below populated
+            // ONLY with IfcBuildingElementPart parts (raised floor / cladding /
+            // insulation). The structural slab face is the part-stack's outer
+            // boundary toward the slab body — for 'below' that's the bottom of
+            // the lowest part (where the part rests on the structural slab),
+            // for 'above' the top of the highest part (where the part hangs
+            // off the slab underside).
+            const partFace = direction === 'above'
+                ? slabBounds.maxB - originB
+                : slabBounds.minB - originB
+            if (!Number.isFinite(partFace)) continue
+            if (partFallback == null) {
+                partFallback = partFace
+            } else if (direction === 'above' ? partFace > partFallback : partFace < partFallback) {
+                partFallback = partFace
+            }
+            continue
+        }
         const face = direction === 'above'
             ? slabBounds.minB - originB
             : slabBounds.maxB - originB
@@ -1113,7 +1133,7 @@ function getStructuralSlabFaceDy(
             best = face
         }
     }
-    return best
+    return best ?? partFallback
 }
 
 /** Show 10 cm of the structural slab at the top and bottom of every elevation. */
@@ -2501,10 +2521,17 @@ function extractMeshSectionSegments(
             return 0
         })
         // When exactly two vertices lie on the cut plane, the shared edge IS the section
-        // edge. This happens often for prismatic wall meshes whose triangulation includes
-        // horizontal edges at the cut height; the intersection walk below would drop them
-        // because it only emits plane-crossing segments. Emit the on-plane edge directly.
+        // edge — but only if the triangle's THIRD vertex is meaningfully off the plane.
+        // For features whose geometry only TANGENTIALLY touches cutY (e.g. a maintenance
+        // opening / revisionsöffnung whose bottom edge sits at 1.80 m without actually
+        // crossing it), the on-plane edge is just a tangent and shouldn't be drawn as a
+        // section. Require ≥ 5 mm out-of-plane to suppress those phantoms.
         if (sides.filter((s) => s === 0).length === 2) {
+            const offPlaneIdx = sides.findIndex((s) => s !== 0)
+            if (offPlaneIdx >= 0) {
+                const offPlaneDistance = Math.abs(verts[offPlaneIdx].y - cutY)
+                if (offPlaneDistance < 0.005) return
+            }
             const onPlane = verts.filter((_, i) => sides[i] === 0)
             registerSegment(
                 new THREE.Vector3(onPlane[0].x, cutY, onPlane[0].z),
@@ -2683,14 +2710,14 @@ function reconstructPolygonsFromSegments(
 }
 
 /**
- * Render a single wall mesh as a set of filled plan-section polygons + crisp
- * outline edges, clipped to the door's plan corridor. Closed loops reconstructed
- * from the mesh section become filled polygons; open chains whose endpoints lie
- * within {@link PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS} in xz are promoted to fills.
- * Remaining open chains are emitted as outline-only polylines.
+ * Render a group of wall meshes (e.g. host wall + its IfcBuildingElementPart
+ * cladding/insulation parts) as one combined plan-section. Segments from every
+ * mesh are MERGED before reconstruction so the seams between parts close into
+ * proper filled polygons instead of fragmenting into outline-only edges (the
+ * "missing cutted buildingelementpart walls" failure for -1UG).
  */
-function addMeshPlanSectionForWall(
-    mesh: THREE.Mesh,
+function addMeshPlanSectionForWallGroup(
+    meshes: THREE.Mesh[],
     cutY: number,
     corridor: PlanSectionCorridor,
     camera: THREE.OrthographicCamera,
@@ -2701,7 +2728,10 @@ function addMeshPlanSectionForWall(
     layer: number,
     out: { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
 ): number {
-    const segments = extractMeshSectionSegments(mesh, cutY)
+    const segments: Array<{ a: THREE.Vector3; b: THREE.Vector3 }> = []
+    for (const mesh of meshes) {
+        segments.push(...extractMeshSectionSegments(mesh, cutY))
+    }
     if (segments.length === 0) return 0
     const { closedLoops, openChains } = reconstructPolygonsFromSegments(segments)
 
@@ -2800,25 +2830,54 @@ function createMeshPlanSectionGeometry(
     const relDepthMax = depthHalfSpan
     const originDepth = frame.origin.dot(depthAxis)
 
+    // Lateral clamp: same formula as `getElevationHostClipBounds` so plan and
+    // elevation share the same width of context around the door. Without this
+    // the plan corridor was unbounded laterally while elevation clipped to
+    // ±lateralGap, so when the two PNGs are stacked the door sits at
+    // different X positions ("Kontext ist nicht gleich breit wie grundriss /
+    // ansicht" — 45/46 reviewed failures).
+    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5)
+    const originWidth = frame.origin.dot(widthAxis)
     const corridor: PlanSectionCorridor = {
         widthAxis,
         depthAxis,
-        minWidth: Number.NEGATIVE_INFINITY,
-        maxWidth: Number.POSITIVE_INFINITY,
+        minWidth: originWidth - frame.width / 2 - lateralGap,
+        maxWidth: originWidth + frame.width / 2 + lateralGap,
         minDepth: originDepth + relDepthMin,
         maxDepth: originDepth + relDepthMax,
     }
 
     // Plan wall rendering is mesh-only — no bbox under-fill, no synthetic
-    // rects. Only what `addMeshPlanSectionForWall` finds at the cut plane.
-    // If web-ifc leaves a wall sparse at cutY, the plan reflects that
-    // honestly instead of inventing a rectangle based on the wall's bbox.
+    // rects. Closed-loop reconstruction merges segments from the host wall
+    // AND its IfcBuildingElementPart cladding/insulation parts so seams
+    // between parts collapse into one continuous fill polygon (otherwise the
+    // -1UG cladding cuts dropped to outline-only and the wall read as thin
+    // lines). Each wall + its parts forms one group; nearby walls each form
+    // their own group so independent cuts don't merge across rooms.
     const hostWallCfc = context.hostWall ? context.wallBKP?.get(context.hostWall.expressID) ?? null : null
     const hostWallCutColor = resolveWallCutColor(hostWallCfc) ?? options.wallColor
 
-    for (const mesh of wallMeshes) {
-        addMeshPlanSectionForWall(
-            mesh,
+    const groups: THREE.Mesh[][] = []
+    if (hostMeshes.length > 0) groups.push(hostMeshes)
+    if (nearbyMeshes.length > 0) {
+        // Group nearby meshes per parent wall via expressID so each adjacent
+        // wall's parts merge with itself but not with another wall.
+        const byParent = new Map<number, THREE.Mesh[]>()
+        const orphan: THREE.Mesh[] = []
+        for (const mesh of nearbyMeshes) {
+            const id = mesh.userData?.expressID
+            if (typeof id !== 'number') { orphan.push(mesh); continue }
+            const arr = byParent.get(id) ?? []
+            arr.push(mesh)
+            byParent.set(id, arr)
+        }
+        for (const meshes of byParent.values()) groups.push(meshes)
+        if (orphan.length > 0) groups.push(orphan)
+    }
+
+    for (const meshes of groups) {
+        addMeshPlanSectionForWallGroup(
+            meshes,
             cutY,
             corridor,
             camera,
@@ -4852,6 +4911,11 @@ function filterContextForElevationOcclusion(
     // from the opposite view and the door reads as solid wall-colour on one
     // side and glass-colour on the other (0OLNP8lGUkIgzNri… case).
     const filteredNearbyDoors = context.nearbyDoors.filter((d) => !isElementOccluded(d.boundingBox ?? null))
+    // Devices straddling the host wall plane (mounted in/at the door jamb)
+    // belong on both views — surface socket on one side, J-box flush in the
+    // wall, etc. Centre-based filter drops them from one view; band-
+    // intersection keeps them on both ('fehlende elektro-elemente' fix).
+    const filteredNearbyDevices = context.nearbyDevices.filter((d) => !isElementOccluded(d.boundingBox ?? null))
 
     const filteredContext: DoorContext = {
         ...context,
@@ -4859,7 +4923,7 @@ function filterContextForElevationOcclusion(
         nearbyWindows: context.nearbyWindows ? filterElements(context.nearbyWindows, 'nearbyWindow') : context.nearbyWindows,
         nearbyWalls: filteredWalls,
         nearbyStairs: filterElements(context.nearbyStairs, 'nearbyStair'),
-        nearbyDevices: filterElements(context.nearbyDevices, 'nearbyDevice'),
+        nearbyDevices: filteredNearbyDevices,
         wallAggregatePartLinks: filteredLinks,
     }
 

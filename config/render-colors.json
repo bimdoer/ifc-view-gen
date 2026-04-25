@@ -43,6 +43,9 @@
   "safety": {
     "layerKeywords": ["e_sicherheit", "sicherheit"]
   },
+  "hide": {
+    "layerKeywords": ["mobilier", "möbel", "moebel", "einrichtung"]
+  },
   "strokes": {
     "outline": "#000000"
   }
