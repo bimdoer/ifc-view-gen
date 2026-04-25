@@ -2096,45 +2096,13 @@ function createSemanticPlanNearbyWindowGeometry(
     height: number,
     cutHeight: number
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
-    const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
-    const frame = context.viewFrame
-
-    for (const rect of getNearbyWindowPlanRects(context, cutHeight)) {
-        const outer = createRectPoints3D(
-            frame.origin.clone().add(frame.upAxis.clone().multiplyScalar(cutHeight - frame.origin.y)),
-            frame.widthAxis,
-            frame.semanticFacing,
-            rect.minA,
-            rect.maxA,
-            rect.minB,
-            rect.maxB
-        )
-        appendProjectedFillPolygon(
-            geometry,
-            outer,
-            camera,
-            width,
-            height,
-            CONTEXT_DOOR_FILL_COLOR,
-            -0.25,
-            CONTEXT_DOOR_FILL_OPACITY
-        )
-        for (let i = 0; i < outer.length; i++) {
-            appendProjectedEdge(
-                geometry,
-                outer[i],
-                outer[(i + 1) % outer.length],
-                camera,
-                width,
-                height,
-                CONTEXT_DOOR_LINE_COLOR,
-                -0.25,
-                CONTEXT_DOOR_EDGE_STROKE_FACTOR
-            )
-        }
-    }
-
-    return geometry
+    // Empty: rendering nearby windows as their AABB rect drew big squares
+    // around round-window cutouts when the window's bbox happens to straddle
+    // cutHeight. The wall's mesh-section already produces the actual hole
+    // for windows that ARE cut at the plane (perpendicular walls); high or
+    // low windows correctly disappear instead of showing a fake bbox at the
+    // cut plane. Same policy as `createSemanticElevationNearbyWindowGeometry`.
+    return { edges: [], polygons: [] }
 }
 
 function createSemanticElevationCeilingGeometry(
@@ -6061,19 +6029,37 @@ function renderPlanFromMeshes(
 
     const planViewportClip = getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
 
-    const renderGeometry = collectProjectedGeometry(
-        doorMeshes,
-        context,
-        opts,
-        camera,
-        frustumWidth,
-        frustumHeight,
-        true,
-        0,
-        'camera-facing',
-        false,
-        DOOR_EDGE_STROKE_FACTOR
-    )
+    // Plan door rendering: same frame-vs-leaf split as elevation so the
+    // metal frame paints anthrazit while the leaf paints its BKP colour
+    // (e.g. wood door → hellbraun leaf + anthrazit frame). Without the
+    // override the entire door went BKP-colour and frame was not visible
+    // distinctly in plan.
+    const planLeafMeshes = new Set(pickDoorLeafMeshes(doorMeshes, frame))
+    const planFrameColor = COLORS.elevation.door.byBKP.metal
+    const renderGeometry = { edges: [] as ProjectedEdge[], polygons: [] as ProjectedPolygon[] }
+    for (const mesh of doorMeshes) {
+        const expressID = mesh.userData.expressID
+        const style = getMeshPolygonStyle(mesh, expressID, context, opts, false)
+        let color = style.color
+        const fillOpacity = style.fillOpacity ?? 1
+        if (
+            expressID === context.door.expressID
+            && !planLeafMeshes.has(mesh)
+            && !isLikelyGlazingPanelMesh(mesh)
+        ) {
+            color = planFrameColor
+        }
+        const posCount = mesh.geometry?.attributes?.position?.count || 0
+        if (posCount === 0) continue
+        if (opts.showFills) {
+            renderGeometry.polygons.push(
+                ...extractPolygons(mesh, camera, color, frustumWidth, frustumHeight, 0, 'camera-facing', fillOpacity)
+            )
+        }
+        renderGeometry.edges.push(
+            ...extractEdges(mesh, camera, opts.lineColor, frustumWidth, frustumHeight, true, 0, DOOR_EDGE_STROKE_FACTOR)
+        )
+    }
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
     const nearbyDoorGeometryRaw = createSemanticPlanNearbyDoorGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
     const nearbyWindowGeometryRaw = createSemanticPlanNearbyWindowGeometry(context, camera, frustumWidth, frustumHeight, cutHeight)
