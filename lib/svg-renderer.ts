@@ -2800,19 +2800,28 @@ function createMeshPlanSectionGeometry(
     const relDepthMax = depthHalfSpan
     const originDepth = frame.origin.dot(depthAxis)
 
-    // Lateral clamp: same formula as `getElevationHostClipBounds` so plan and
-    // elevation share the same width of context around the door. Without this
-    // the plan corridor was unbounded laterally while elevation clipped to
-    // ±lateralGap, so when the two PNGs are stacked the door sits at
-    // different X positions ("Kontext ist nicht gleich breit wie grundriss /
-    // ansicht" — 45/46 reviewed failures).
-    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5)
+    // Lateral clamp: shared with elevation via `getSharedLateralExtentLocal`,
+    // which derives the visible widthAxis range from the host wall's mesh-
+    // cut at cutY. When the host wall stops short of lateralGap, both views
+    // clip at the wall's actual end so context stays consistent.
+    const halfDoorWidth = frame.width / 2
+    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.5, 0.5, 1.5)
+    const sharedExtent = getSharedLateralExtentLocal(context)
+    let lateralMinLocal: number
+    let lateralMaxLocal: number
+    if (sharedExtent) {
+        lateralMinLocal = Math.min(Math.max(sharedExtent.minLocal, -halfDoorWidth - lateralGap), -halfDoorWidth)
+        lateralMaxLocal = Math.max(Math.min(sharedExtent.maxLocal, halfDoorWidth + lateralGap), halfDoorWidth)
+    } else {
+        lateralMinLocal = -halfDoorWidth - lateralGap
+        lateralMaxLocal = halfDoorWidth + lateralGap
+    }
     const originWidth = frame.origin.dot(widthAxis)
     const corridor: PlanSectionCorridor = {
         widthAxis,
         depthAxis,
-        minWidth: originWidth - frame.width / 2 - lateralGap,
-        maxWidth: originWidth + frame.width / 2 + lateralGap,
+        minWidth: originWidth + lateralMinLocal,
+        maxWidth: originWidth + lateralMaxLocal,
         minDepth: originDepth + relDepthMin,
         maxDepth: originDepth + relDepthMax,
     }
@@ -2931,6 +2940,58 @@ function shouldRenderDeviceInElevation(
 }
 
 const PLAN_CUT_HEIGHT_METERS = 1.8
+
+/**
+ * Single source of truth for the lateral (widthAxis) crop window shared by
+ * plan + elevation. Runs the host wall's mesh-section at cutY and returns
+ * the widthAxis extent of the resulting segments in coordinates LOCAL to
+ * frame.origin. The corridor clamps both views to this same extent so the
+ * door anchor's visible context width is identical in plan and elevation
+ * (eliminates the "Kontext ist nicht gleich breit" misalignment when the
+ * two views are stacked).
+ *
+ * Returns null when the host wall has no triangles crossing cutY (sparse
+ * mesh) — callers fall back to the door-anchored lateralGap.
+ */
+function getSharedLateralExtentLocal(
+    context: DoorContext
+): { minLocal: number; maxLocal: number } | null {
+    const frame = context.viewFrame
+    const cutY = frame.origin.y - frame.height / 2 + PLAN_CUT_HEIGHT_METERS
+    const originW = frame.origin.dot(frame.widthAxis)
+    // Combine all segments from the host wall + its aggregate parts and run
+    // the same reconstruction the plan view does — then take the widthAxis
+    // extent of the reconstructed CLOSED LOOPS only. Loops are the wall's
+    // actual visible cut at cutY; raw segments include phantom triangle
+    // edges from boolean-cut artefacts and aggregate parts that extend past
+    // the rendered footprint. Falls back to all segments if no closed loops
+    // emerge (sparse meshes).
+    const allSegs: Array<{ a: THREE.Vector3; b: THREE.Vector3 }> = []
+    for (const mesh of getHostWallMeshes(context)) {
+        allSegs.push(...extractMeshSectionSegments(mesh, cutY))
+    }
+    if (allSegs.length === 0) return null
+    const { closedLoops, openChains } = reconstructPolygonsFromSegments(allSegs)
+    let minLocal = Infinity
+    let maxLocal = -Infinity
+    const collect = (pts: THREE.Vector3[]) => {
+        for (const p of pts) {
+            const w = p.dot(frame.widthAxis) - originW
+            if (w < minLocal) minLocal = w
+            if (w > maxLocal) maxLocal = w
+        }
+    }
+    if (closedLoops.length > 0) {
+        for (const loop of closedLoops) collect(loop)
+    } else {
+        for (const chain of openChains) collect(chain)
+    }
+    if (minLocal === Infinity) return null
+    if (process.env.DEBUG_SHARED_LATERAL === '1') {
+        console.log(`[shared] door=${context.doorId} closedLoops=${closedLoops.length} openChains=${openChains.length} extent=[${minLocal.toFixed(3)}, ${maxLocal.toFixed(3)}]`)
+    }
+    return { minLocal, maxLocal }
+}
 
 function deviceVisibleInPlan(context: DoorContext, device: THREE.Box3): boolean {
     const frame = context.viewFrame
@@ -3480,19 +3541,27 @@ function getElevationHostClipBounds(
     bounds.minY = Math.min(projectedTop.y, projectedBottom.y)
     bounds.maxY = Math.max(projectedTop.y, projectedBottom.y)
 
-    // Clamp horizontal extent to a tight window around the door so long host
-    // walls, nearby-door bands or slab edges running across the storey cannot
-    // stretch the frustum horizontally. The lateral window is sized to still
-    // reveal an adjacent door + small wall reveal on each side (~1.5-2 m for
-    // a standard 1 m door, ~door-width either side for wide curtain-wall
-    // doors), but no further.
-    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5)
-    const leftPoint = frame.origin.clone().add(
-        frame.widthAxis.clone().multiplyScalar(-frame.width / 2 - lateralGap)
-    )
-    const rightPoint = frame.origin.clone().add(
-        frame.widthAxis.clone().multiplyScalar(frame.width / 2 + lateralGap)
-    )
+    // Lateral clamp shared with plan corridor — `getSharedLateralExtentLocal`
+    // returns the host wall's mesh-cut widthAxis extent at cutY, exactly
+    // what plan visibly renders. Both views clip to that so a perpendicular
+    // T-junction stub past the host wall's end (the "bottom-left context"
+    // case) gets cropped from both. Fall back to door-anchored lateralGap
+    // when no mesh section is available, capped at lateralGap so very long
+    // partitions still bound the elevation.
+    const halfDoorWidth = frame.width / 2
+    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.5, 0.5, 1.5)
+    const sharedExtent = getSharedLateralExtentLocal(context)
+    let localMinW: number
+    let localMaxW: number
+    if (sharedExtent) {
+        localMinW = Math.min(Math.max(sharedExtent.minLocal, -halfDoorWidth - lateralGap), -halfDoorWidth)
+        localMaxW = Math.max(Math.min(sharedExtent.maxLocal, halfDoorWidth + lateralGap), halfDoorWidth)
+    } else {
+        localMinW = -halfDoorWidth - lateralGap
+        localMaxW = halfDoorWidth + lateralGap
+    }
+    const leftPoint = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(localMinW))
+    const rightPoint = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(localMaxW))
     const projectedLeft = projectPoint(leftPoint, camera, width, height)
     const projectedRight = projectPoint(rightPoint, camera, width, height)
     const lateralMin = Math.min(projectedLeft.x, projectedRight.x)
@@ -6027,7 +6096,35 @@ function renderPlanFromMeshes(
         polygons: [],
     }
 
-    const planViewportClip = getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
+    let planViewportClip = getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
+    // Tighten the viewport clip to the SAME shared lateral extent used by
+    // the wall-section corridor + elevation clip, so nearby doors / windows
+    // / devices outside the host wall's visible cut are dropped.
+    if (planViewportClip) {
+        const sharedExtent = getSharedLateralExtentLocal(context)
+        const planLateralGap = THREE.MathUtils.clamp(frame.width * 0.5, 0.5, 1.5)
+        const planHalfDoor = frame.width / 2
+        let planLatMin: number
+        let planLatMax: number
+        if (sharedExtent) {
+            planLatMin = Math.min(Math.max(sharedExtent.minLocal, -planHalfDoor - planLateralGap), -planHalfDoor)
+            planLatMax = Math.max(Math.min(sharedExtent.maxLocal, planHalfDoor + planLateralGap), planHalfDoor)
+        } else {
+            planLatMin = -planHalfDoor - planLateralGap
+            planLatMax = planHalfDoor + planLateralGap
+        }
+        const widthAxisN = frame.widthAxis.clone().normalize()
+        const leftPt = frame.origin.clone().add(widthAxisN.clone().multiplyScalar(planLatMin))
+        const rightPt = frame.origin.clone().add(widthAxisN.clone().multiplyScalar(planLatMax))
+        const leftProj = projectPoint(leftPt, camera, frustumWidth, frustumHeight).x
+        const rightProj = projectPoint(rightPt, camera, frustumWidth, frustumHeight).x
+        planViewportClip = {
+            minX: Math.max(planViewportClip.minX, Math.min(leftProj, rightProj)),
+            maxX: Math.min(planViewportClip.maxX, Math.max(leftProj, rightProj)),
+            minY: planViewportClip.minY,
+            maxY: planViewportClip.maxY,
+        }
+    }
 
     // Plan door rendering: same frame-vs-leaf split as elevation so the
     // metal frame paints anthrazit while the leaf paints its BKP colour
