@@ -6,6 +6,8 @@ import {
     getHostCeilingMeshes,
     getHostSlabMeshes,
     getHostWallMeshes,
+    getHostAndCoplanarWallMeshes,
+    getCoplanarHostWallExpressIDs,
     getNearbyDoorMeshes,
     getNearbyWindowMeshes,
     getNearbyStairMeshes,
@@ -17,6 +19,14 @@ import {
     INTER_WOFF2_LATIN_600_BASE64,
     INTER_WOFF2_LATIN_700_BASE64,
 } from './inter-svg-font-embed-data'
+import {
+    classifyDoorBKP,
+    isSafetyDevice,
+    loadRenderColors,
+    resolveElevationDoorColor,
+    resolveWallCutColor,
+    resolveWallElevationColor,
+} from './color-config'
 
 export interface SVGRenderOptions {
     width?: number
@@ -34,6 +44,10 @@ export interface SVGRenderOptions {
     deviceColor?: string
     /** Fill color for glazing in Vorder-/Rückansicht only; Grundriss uses `doorColor` for those meshes. */
     glassColor?: string
+    /** Fill for safety/alarm devices (Rauchmelder, Notleuchte, …). Classified by `isSafetyDevice` (layer + name). */
+    safetyColor?: string
+    /** Fill for IfcCovering.CEILING. (abgehängte Decke / suspended ceiling). Defaults to `elevation.suspendedCeiling`. */
+    suspendedCeilingColor?: string
     /** Opacity for glazing fills in Ansichten (0–1); ignored im Grundriss (gleiche Opacity wie übrige Türfläche). */
     glassFillOpacity?: number
     backgroundColor?: string // Background color for area outside door
@@ -84,30 +98,60 @@ function svgWebFontDefs(fontFamily: string): string {
 `
 }
 
-/** Plan SVG canvas height = `width × PLAN_SVG_HEIGHT_RATIO` (Grundriss is wider-than-tall, not square). */
-export const PLAN_SVG_HEIGHT_RATIO = 0.5
+/**
+ * Elevation rendering policy (single mode, always on):
+ *   - canvas: 1000×1000 square, no title block, no legend, no labels.
+ *   - scale: FIXED at `FIXED_PX_PER_METER` for every door + every view so the
+ *     same wall thickness reads the same pixel width across the fleet. Picked
+ *     so a 4 m slab-to-slab storey (10 cm upper slab + 3.8 m floor + 10 cm
+ *     lower slab — the design max) exactly fills the picture height.
+ *   - vertical: content bottom anchored to the canvas bottom. The 10 cm upper-
+ *     slab and 10 cm lower-slab crop from `getElevationHostClipBounds` is
+ *     always drawn in full — no overflow for storeys up to 4 m.
+ *   - horizontal: door frame origin anchored to the canvas width centre so
+ *     front/back/plan agree on the door's X position. Wall panels and slab
+ *     strips extend to the canvas edges (no side gutter, no white border).
+ *   - plan: fits bounds centred, uses its own scale, but door X still lines
+ *     up with the elevations.
+ */
+
+/** Fixed drawing scale in SVG pixels per metre. 285 × 3.5 m ≈ 1000 SVG px,
+ * filling the 1000 px square canvas at the 3.5 m content cap. Lateral canvas
+ * window 1000/285 ≈ 3.5 m, enough to show cut-wall reveals on both sides of a
+ * 2.5 m door. */
+export const FIXED_PX_PER_METER = 285
+
+/** Elevation canvas is edge-to-edge content — no pads anywhere. */
+export const ELEVATION_TOP_PAD_PX = 0
+export const ELEVATION_BOTTOM_PAD_PX = 0
+export const ELEVATION_SIDE_PAD_PX = 0
+
+/** Plan SVG canvas is square (1.0) to match elevation dimensions, so when the
+ * three views are stacked in Airtable's grid the door anchor lines up across
+ * all three at the same X. Plan content is vertically centred inside the
+ * square; extra whitespace top/bottom is the trade-off. Set < 1 to crop. */
+export const PLAN_SVG_HEIGHT_RATIO = 1.0
 
 export function planSvgCanvasHeight(canvasWidth: number): number {
     return Math.round(canvasWidth * PLAN_SVG_HEIGHT_RATIO)
 }
-
-const DEBUG_INGEST_ENDPOINT = 'http://127.0.0.1:7608/ingest/541b0157-3c53-498b-b181-d30bf9fa6695'
-const DEBUG_SESSION_ID = '2d93f2'
 
 const DEFAULT_OPTIONS: Required<SVGRenderOptions> = {
     width: 1000,
     height: 1000,
     margin: 0.5,
     planCropMarginMeters: 0.5,
-    doorColor: '#dedede',
-    wallColor: '#e3e3e3',
-    floorSlabColor: '#e3e3e3',
-    deviceColor: '#fcc647',
-    glassColor: '#b8d4e8',
+    doorColor: COLORS.elevation.door.default,
+    wallColor: COLORS.elevation.wall,
+    floorSlabColor: COLORS.plan.wallCut,
+    deviceColor: COLORS.plan.electrical,
+    glassColor: COLORS.elevation.glass,
+    safetyColor: COLORS.plan.safety,
+    suspendedCeilingColor: COLORS.elevation.suspendedCeiling,
     glassFillOpacity: 0.32,
-    backgroundColor: '#fff', // Light gray background
+    backgroundColor: '#fff',
     lineWidth: 1.5,
-    lineColor: '#000000',
+    lineColor: COLORS.strokes.outline,
     showFills: true,
     showLegend: true,
     showLabels: true,
@@ -166,8 +210,8 @@ const WALL_EDGE_STROKE_FACTOR = 1.15
 const PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS = 0.025
 const DEVICE_EDGE_STROKE_FACTOR = 0.75
 const CONTEXT_DOOR_EDGE_STROKE_FACTOR = 0.55
-const CONTEXT_DOOR_FILL_COLOR = '#d1d5db'
-const CONTEXT_DOOR_LINE_COLOR = '#6b7280'
+const CONTEXT_DOOR_FILL_COLOR = COLORS.plan.doorContext
+const CONTEXT_DOOR_LINE_COLOR = COLORS.strokes.outline
 const CONTEXT_DOOR_FILL_OPACITY = 0.32
 
 const DEBUG_ELEVATION_COLORS =
@@ -260,16 +304,41 @@ function getMeshPolygonStyle(
         }
         return { color: options.doorColor }
     }
+    // Adjacent / nearby doors: glass panes still read blau; the leaf/frame
+    // takes the BKP colour of THAT specific door (metal → anthrazit, wood →
+    // hellbraun, unknown → default). Without this branch nearby doors fell
+    // through to the synthetic rectangle path and showed as hellgrau rects.
+    const isNearbyDoor = context.nearbyDoors.some((d) => d.expressID === expressID)
+    if (isNearbyDoor) {
+        if (useGlassStyling && isLikelyGlazingPanelMesh(mesh)) {
+            return { color: options.glassColor, fillOpacity: options.glassFillOpacity }
+        }
+        return { color: resolveElevationDoorColor(context.nearbyDoorBKP.get(expressID)) }
+    }
     if (isHostSlab) {
         const dbg = debugColorFor(expressID)
         return { color: dbg ?? options.floorSlabColor }
+    }
+    // Wall BKP resolver: drywall (CFC 2711) paints graubraun, default concrete /
+    // masonry paints grau. `useGlassStyling === true` means we're rendering an
+    // elevation view; `false` means the plan-cut view. Both views use the same
+    // palette but live under different roles so the spec can diverge later.
+    const resolveWallColor = (expressID: number): string => {
+        const cfc = context.wallBKP?.get(expressID) ?? null
+        return useGlassStyling
+            ? resolveWallElevationColor(cfc)
+            : resolveWallCutColor(cfc)
     }
     if (
         (context.hostWall && expressID === context.hostWall.expressID)
         || (context.wall && expressID === context.wall.expressID)
     ) {
         const dbg = debugColorFor(expressID)
-        return { color: dbg ?? options.wallColor }
+        return { color: dbg ?? resolveWallColor(expressID) }
+    }
+    if (context.nearbyWalls?.some((w) => w.expressID === expressID)) {
+        const dbg = debugColorFor(expressID)
+        return { color: dbg ?? resolveWallColor(expressID) }
     }
     // IfcBuildingElementPart children of a wall (cladding, insulation, gypsum
     // board, etc.) have their own expressIDs but visually belong to the wall.
@@ -277,7 +346,7 @@ function getMeshPolygonStyle(
     // rendered as big orange rectangles beside the door.
     if (context.wallAggregatePartLinks?.some((link) => link.part.expressID === expressID)) {
         const dbg = debugColorFor(expressID)
-        return { color: dbg ?? options.wallColor }
+        return { color: dbg ?? resolveWallColor(expressID) }
     }
     if (DEBUG_ELEVATION_COLORS) {
         // Everything that falls through — the meshes we currently can't explain
@@ -784,6 +853,70 @@ function measureMeshesInAxes(
     return { minA, maxA, minB, maxB, minC, maxC }
 }
 
+/**
+ * Like `measureMeshesInAxes` but only counts vertices whose projection on
+ * `axisC` falls within `[centerC - halfWidth, centerC + halfWidth]`. Used to
+ * extract the TRUE cross-section of a nearby wall at the door's elevation
+ * plane — vertices far in front of / behind the door (e.g. a perpendicular
+ * wall extending 4 m into the back room) are excluded, so the rendered rect
+ * matches the visible cut face instead of the wall's full bbox.
+ */
+function measureMeshesInAxesDepthBand(
+    meshes: THREE.Mesh[],
+    axisA: THREE.Vector3,
+    axisB: THREE.Vector3,
+    axisC: THREE.Vector3,
+    centerC: number,
+    halfWidth: number
+): AxisBounds | null {
+    let minA = Infinity
+    let maxA = -Infinity
+    let minB = Infinity
+    let maxB = -Infinity
+    let minC = Infinity
+    let maxC = -Infinity
+    const lo = centerC - halfWidth
+    const hi = centerC + halfWidth
+    const point = new THREE.Vector3()
+
+    for (const mesh of meshes) {
+        const geometry = mesh.geometry as THREE.BufferGeometry | undefined
+        const positions = geometry?.getAttribute('position')
+        if (!geometry || !positions || positions.count === 0) continue
+
+        mesh.updateMatrixWorld(true)
+        const index = geometry.getIndex()
+        const projectVertex = (vertexIndex: number) => {
+            point
+                .set(positions.getX(vertexIndex), positions.getY(vertexIndex), positions.getZ(vertexIndex))
+                .applyMatrix4(mesh.matrixWorld)
+            const c = point.dot(axisC)
+            if (c < lo || c > hi) return
+            const a = point.dot(axisA)
+            const b = point.dot(axisB)
+            if (a < minA) minA = a
+            if (a > maxA) maxA = a
+            if (b < minB) minB = b
+            if (b > maxB) maxB = b
+            if (c < minC) minC = c
+            if (c > maxC) maxC = c
+        }
+
+        if (index && index.count > 0) {
+            for (let i = 0; i < index.count; i++) {
+                projectVertex(index.getX(i))
+            }
+        } else {
+            for (let i = 0; i < positions.count; i++) {
+                projectVertex(i)
+            }
+        }
+    }
+
+    if (minA === Infinity) return null
+    return { minA, maxA, minB, maxB, minC, maxC }
+}
+
 function getHostWallAxisBounds(
     context: DoorContext,
     axisA: THREE.Vector3,
@@ -961,8 +1094,8 @@ function getStructuralSlabFaceDy(
     const slabs = direction === 'above' ? context.hostSlabsAbove : context.hostSlabsBelow
     const originB = frame.origin.dot(frame.upAxis)
     let best: number | null = null
+    let partFallback: number | null = null
     for (const slab of slabs) {
-        if ((slab.typeName || '').toUpperCase() === 'IFCBUILDINGELEMENTPART') continue
         if (!slab.boundingBox) continue
         const slabBounds = measureBoundingBoxInAxes(
             slab.boundingBox,
@@ -970,6 +1103,26 @@ function getStructuralSlabFaceDy(
             frame.upAxis,
             frame.semanticFacing
         )
+        const isPart = (slab.typeName || '').toUpperCase() === 'IFCBUILDINGELEMENTPART'
+        if (isPart) {
+            // -1UG and similar storeys can have hostSlabsAbove/Below populated
+            // ONLY with IfcBuildingElementPart parts (raised floor / cladding /
+            // insulation). The structural slab face is the part-stack's outer
+            // boundary toward the slab body — for 'below' that's the bottom of
+            // the lowest part (where the part rests on the structural slab),
+            // for 'above' the top of the highest part (where the part hangs
+            // off the slab underside).
+            const partFace = direction === 'above'
+                ? slabBounds.maxB - originB
+                : slabBounds.minB - originB
+            if (!Number.isFinite(partFace)) continue
+            if (partFallback == null) {
+                partFallback = partFace
+            } else if (direction === 'above' ? partFace > partFallback : partFace < partFallback) {
+                partFallback = partFace
+            }
+            continue
+        }
         const face = direction === 'above'
             ? slabBounds.minB - originB
             : slabBounds.maxB - originB
@@ -980,7 +1133,7 @@ function getStructuralSlabFaceDy(
             best = face
         }
     }
-    return best
+    return best ?? partFallback
 }
 
 /** Show 10 cm of the structural slab at the top and bottom of every elevation. */
@@ -1159,6 +1312,8 @@ type AxisRect = {
     maxA: number
     minB: number
     maxB: number
+    /** IFC expressID of the source element, used by renderers to look up BKP / colour. */
+    expressID?: number
 }
 
 function rangesOverlapOrTouch(
@@ -1318,8 +1473,10 @@ function createSemanticElevationWallGeometry(
         rects.push(createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, -halfDoorWidth, halfDoorWidth, top, top + revealHeight))
     }
 
+    const hostWallCfc = context.hostWall ? context.wallBKP?.get(context.hostWall.expressID) ?? null : null
+    const hostWallElevColor = resolveWallElevationColor(hostWallCfc) ?? options.wallColor
     for (const rect of rects) {
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.wallColor, options.lineColor, -1, 1, WALL_EDGE_STROKE_FACTOR)
+        appendProjectedPolygon(geometry, rect, camera, width, height, hostWallElevColor, options.lineColor, -1, 1, WALL_EDGE_STROKE_FACTOR)
     }
 
     return geometry
@@ -1567,9 +1724,18 @@ function getNearbyDoorAxisRects(context: DoorContext): AxisRect[] {
     const frame = context.viewFrame
     const originA = frame.origin.dot(frame.widthAxis)
     const originB = frame.origin.dot(frame.upAxis)
+    const originC = frame.origin.dot(frame.semanticFacing)
     const seenDoorIDs = new Set<number>()
     const rects: AxisRect[] = []
     const nearbyDoorMeshes = getNearbyDoorMeshes(context)
+
+    // Only show nearby doors that actually sit in (or straddle) the host
+    // wall plane. A door far down a perpendicular hallway would otherwise
+    // ghost onto this elevation as a translucent overlay even though
+    // architecturally it's in a different wall. Test the nearby door's
+    // depth CENTER (not its range) so a long wall barely clipping the
+    // tolerance band cannot smuggle a hallway door through.
+    const DEPTH_CENTER_TOLERANCE_METERS = Math.max(frame.thickness, 0.08) + 0.10
 
     for (const nearbyDoor of context.nearbyDoors || []) {
         if (seenDoorIDs.has(nearbyDoor.expressID) || !nearbyDoor.boundingBox) {
@@ -1596,11 +1762,17 @@ function getNearbyDoorAxisRects(context: DoorContext): AxisRect[] {
             continue
         }
 
+        const depthCenter = (bounds.minC + bounds.maxC) / 2 - originC
+        if (Math.abs(depthCenter) > DEPTH_CENTER_TOLERANCE_METERS) {
+            continue
+        }
+
         rects.push({
             minA: bounds.minA - originA,
             maxA: bounds.maxA - originA,
             minB: bounds.minB - originB,
             maxB: bounds.maxB - originB,
+            expressID: nearbyDoor.expressID,
         })
     }
 
@@ -1638,6 +1810,7 @@ function getNearbyDoorPlanRects(context: DoorContext, cutHeight: number): AxisRe
             maxA: bounds.maxA - originA,
             minB: bounds.minB - originB,
             maxB: bounds.maxB - originB,
+            expressID: nearbyDoor.expressID,
         })
     }
 
@@ -1756,16 +1929,59 @@ function getNearbyStairAxisRects(context: DoorContext): AxisRect[] {
     return rects
 }
 
+/**
+ * Project the TRUE 3D mesh geometry of every adjacent door. Uses the same
+ * sharp-edge / polygon pipeline as the current door — no synthetic outer
+ * rectangle, no fake inset frame. Colour per door comes from
+ * `getMeshPolygonStyle` which reads `context.nearbyDoorBKP` → palette. Glass
+ * panes still fall through to `options.glassColor`.
+ *
+ * Falls back to a bbox rectangle (BKP-coloured, still no inset) only when a
+ * door has no mesh data at all.
+ */
 function createSemanticElevationNearbyDoorGeometry(
     context: DoorContext,
     camera: THREE.OrthographicCamera,
     width: number,
-    height: number
+    height: number,
+    options: Required<SVGRenderOptions>
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     const frame = context.viewFrame
+    const nearbyDoorMeshes = getNearbyDoorMeshes(context)
+
+    if (nearbyDoorMeshes.length > 0) {
+        // `cullMode: 'none'` so single-sided glazing panels render in BOTH
+        // front and back views. With 'camera-facing' their outward-facing
+        // normal gets culled on whichever side faces away from the camera,
+        // which is why adjacent doors rendered blue glass on one view and
+        // grey frame-only on the other (0OLNP8lGUkIgzNri… case).
+        const projected = collectProjectedGeometry(
+            nearbyDoorMeshes,
+            context,
+            options,
+            camera,
+            width,
+            height,
+            false,
+            -0.25,
+            'none',
+            true,
+            DOOR_EDGE_STROKE_FACTOR
+        )
+        geometry.edges.push(...projected.edges)
+        geometry.polygons.push(...projected.polygons)
+    }
+
+    const meshIdsWithGeometry = new Set<number>()
+    for (const mesh of nearbyDoorMeshes) {
+        const eid = mesh.userData?.expressID
+        if (typeof eid === 'number') meshIdsWithGeometry.add(eid)
+    }
 
     for (const rect of getNearbyDoorAxisRects(context)) {
+        if (rect.expressID !== undefined && meshIdsWithGeometry.has(rect.expressID)) continue
+        const fill = resolveElevationDoorColor(context.nearbyDoorBKP.get(rect.expressID ?? -1))
         const outer = createRectPoints3D(
             frame.origin,
             frame.widthAxis,
@@ -1775,54 +1991,60 @@ function createSemanticElevationNearbyDoorGeometry(
             rect.minB,
             rect.maxB
         )
-        appendProjectedFillPolygon(
-            geometry,
-            outer,
-            camera,
-            width,
-            height,
-            CONTEXT_DOOR_FILL_COLOR,
-            -0.25,
-            CONTEXT_DOOR_FILL_OPACITY
-        )
-        appendProjectedEdge(geometry, outer[0], outer[1], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[1], outer[2], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[2], outer[3], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[3], outer[0], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-
-        const insetX = THREE.MathUtils.clamp((rect.maxA - rect.minA) * 0.08, 0.025, 0.06)
-        const insetY = THREE.MathUtils.clamp((rect.maxB - rect.minB) * 0.05, 0.03, 0.08)
-        if (rect.maxA - rect.minA > insetX * 2 && rect.maxB - rect.minB > insetY * 2) {
-            const inner = createRectPoints3D(
-                frame.origin,
-                frame.widthAxis,
-                frame.upAxis,
-                rect.minA + insetX,
-                rect.maxA - insetX,
-                rect.minB + insetY,
-                rect.maxB - insetY
-            )
-            appendProjectedEdge(geometry, inner[0], inner[1], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-            appendProjectedEdge(geometry, inner[1], inner[2], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-            appendProjectedEdge(geometry, inner[2], inner[3], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-            appendProjectedEdge(geometry, inner[3], inner[0], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        }
+        appendProjectedFillPolygon(geometry, outer, camera, width, height, fill, -0.25, 1)
+        appendProjectedEdge(geometry, outer[0], outer[1], camera, width, height, options.lineColor, -0.25, DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[1], outer[2], camera, width, height, options.lineColor, -0.25, DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[2], outer[3], camera, width, height, options.lineColor, -0.25, DOOR_EDGE_STROKE_FACTOR)
+        appendProjectedEdge(geometry, outer[3], outer[0], camera, width, height, options.lineColor, -0.25, DOOR_EDGE_STROKE_FACTOR)
     }
 
     return geometry
 }
 
+/**
+ * Plan-view adjacent doors: project the real mesh (same pipeline as the
+ * current door's top-down projection). BKP-coloured per door via
+ * `getMeshPolygonStyle`. Fallback bbox rectangle only if a door has no mesh.
+ */
 function createSemanticPlanNearbyDoorGeometry(
     context: DoorContext,
     camera: THREE.OrthographicCamera,
     width: number,
     height: number,
-    cutHeight: number
+    cutHeight: number,
+    options: Required<SVGRenderOptions>
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     const frame = context.viewFrame
+    const nearbyDoorMeshes = getNearbyDoorMeshes(context)
+
+    if (nearbyDoorMeshes.length > 0) {
+        const projected = collectProjectedGeometry(
+            nearbyDoorMeshes,
+            context,
+            options,
+            camera,
+            width,
+            height,
+            true,
+            -0.25,
+            'camera-facing',
+            false,
+            DOOR_EDGE_STROKE_FACTOR
+        )
+        geometry.edges.push(...projected.edges)
+        geometry.polygons.push(...projected.polygons)
+    }
+
+    const meshIdsWithGeometry = new Set<number>()
+    for (const mesh of nearbyDoorMeshes) {
+        const eid = mesh.userData?.expressID
+        if (typeof eid === 'number') meshIdsWithGeometry.add(eid)
+    }
 
     for (const rect of getNearbyDoorPlanRects(context, cutHeight)) {
+        if (rect.expressID !== undefined && meshIdsWithGeometry.has(rect.expressID)) continue
+        const fill = resolveElevationDoorColor(context.nearbyDoorBKP.get(rect.expressID ?? -1))
         const outer = createRectPoints3D(
             frame.origin.clone().add(frame.upAxis.clone().multiplyScalar(cutHeight - frame.origin.y)),
             frame.widthAxis,
@@ -1832,16 +2054,7 @@ function createSemanticPlanNearbyDoorGeometry(
             rect.minB,
             rect.maxB
         )
-        appendProjectedFillPolygon(
-            geometry,
-            outer,
-            camera,
-            width,
-            height,
-            CONTEXT_DOOR_FILL_COLOR,
-            -0.25,
-            CONTEXT_DOOR_FILL_OPACITY
-        )
+        appendProjectedFillPolygon(geometry, outer, camera, width, height, fill, -0.25, 1)
         for (let i = 0; i < outer.length; i++) {
             appendProjectedEdge(
                 geometry,
@@ -1850,9 +2063,9 @@ function createSemanticPlanNearbyDoorGeometry(
                 camera,
                 width,
                 height,
-                CONTEXT_DOOR_LINE_COLOR,
+                options.lineColor,
                 -0.25,
-                CONTEXT_DOOR_EDGE_STROKE_FACTOR
+                DOOR_EDGE_STROKE_FACTOR
             )
         }
     }
@@ -1861,41 +2074,17 @@ function createSemanticPlanNearbyDoorGeometry(
 }
 
 function createSemanticElevationNearbyWindowGeometry(
-    context: DoorContext,
-    camera: THREE.OrthographicCamera,
-    width: number,
-    height: number
+    _context: DoorContext,
+    _camera: THREE.OrthographicCamera,
+    _width: number,
+    _height: number
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
-    const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
-    const frame = context.viewFrame
-
-    for (const rect of getNearbyWindowAxisRects(context)) {
-        const outer = createRectPoints3D(
-            frame.origin,
-            frame.widthAxis,
-            frame.upAxis,
-            rect.minA,
-            rect.maxA,
-            rect.minB,
-            rect.maxB
-        )
-        appendProjectedFillPolygon(
-            geometry,
-            outer,
-            camera,
-            width,
-            height,
-            CONTEXT_DOOR_FILL_COLOR,
-            -0.25,
-            CONTEXT_DOOR_FILL_OPACITY
-        )
-        appendProjectedEdge(geometry, outer[0], outer[1], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[1], outer[2], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[2], outer[3], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-        appendProjectedEdge(geometry, outer[3], outer[0], camera, width, height, CONTEXT_DOOR_LINE_COLOR, -0.25, CONTEXT_DOOR_EDGE_STROKE_FACTOR)
-    }
-
-    return geometry
+    // Intentionally empty: the AABB rect around each nearby window drew a
+    // square silhouette over round window cutouts (boolean-cut openings in
+    // the host wall already render as their real shape via the wall mesh's
+    // sharp-edge projection). Relying on the mesh-level silhouette means a
+    // round window reads as a circle, not a square with a circle inside.
+    return { edges: [], polygons: [] }
 }
 
 function createSemanticPlanNearbyWindowGeometry(
@@ -1905,45 +2094,13 @@ function createSemanticPlanNearbyWindowGeometry(
     height: number,
     cutHeight: number
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
-    const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
-    const frame = context.viewFrame
-
-    for (const rect of getNearbyWindowPlanRects(context, cutHeight)) {
-        const outer = createRectPoints3D(
-            frame.origin.clone().add(frame.upAxis.clone().multiplyScalar(cutHeight - frame.origin.y)),
-            frame.widthAxis,
-            frame.semanticFacing,
-            rect.minA,
-            rect.maxA,
-            rect.minB,
-            rect.maxB
-        )
-        appendProjectedFillPolygon(
-            geometry,
-            outer,
-            camera,
-            width,
-            height,
-            CONTEXT_DOOR_FILL_COLOR,
-            -0.25,
-            CONTEXT_DOOR_FILL_OPACITY
-        )
-        for (let i = 0; i < outer.length; i++) {
-            appendProjectedEdge(
-                geometry,
-                outer[i],
-                outer[(i + 1) % outer.length],
-                camera,
-                width,
-                height,
-                CONTEXT_DOOR_LINE_COLOR,
-                -0.25,
-                CONTEXT_DOOR_EDGE_STROKE_FACTOR
-            )
-        }
-    }
-
-    return geometry
+    // Empty: rendering nearby windows as their AABB rect drew big squares
+    // around round-window cutouts when the window's bbox happens to straddle
+    // cutHeight. The wall's mesh-section already produces the actual hole
+    // for windows that ARE cut at the plane (perpendicular walls); high or
+    // low windows correctly disappear instead of showing a fake bbox at the
+    // cut plane. Same policy as `createSemanticElevationNearbyWindowGeometry`.
+    return { edges: [], polygons: [] }
 }
 
 function createSemanticElevationCeilingGeometry(
@@ -1971,7 +2128,7 @@ function createSemanticElevationCeilingGeometry(
         // ceiling at a layer ABOVE the door mesh (door uses layer 0) with
         // opaque fill so the door's outer silhouette verticals terminate at
         // the ceiling's lower edge instead of cutting through it.
-        appendProjectedFillPolygon(geometry, corners, camera, width, height, options.floorSlabColor, 2, 1)
+        appendProjectedFillPolygon(geometry, corners, camera, width, height, options.suspendedCeilingColor, 2, 1)
         // Only the horizontal top+bottom edges are real silhouette lines; the
         // vertical side edges are per-ceiling bbox artefacts (two IfcCoverings
         // meeting above the door) and print as phantom verticals at door-width.
@@ -1993,7 +2150,7 @@ function createSemanticElevationNearbyWallGeometry(
     const frame = context.viewFrame
     const originA = frame.origin.dot(frame.widthAxis)
     const originB = frame.origin.dot(frame.upAxis)
-    const nearbyWallMeshes = getNearbyWallMeshes(context)
+    const originC = frame.origin.dot(frame.semanticFacing)
     // Vertical clamp still uses the door's storey band; lateral clamping is
     // handled downstream by `elevationHostClipBounds` so perpendicular walls
     // outside the door-width corridor (e.g. ±1.3 m at a niche) don't get
@@ -2001,19 +2158,73 @@ function createSemanticElevationNearbyWallGeometry(
     const minB = -frame.height / 2 - getElevationBottomContextGapMeters(context) - 0.1
     const maxB = frame.height / 2 + getElevationTopContextGapMeters(context) + 0.2
 
+    // Depth band along `semanticFacing` — vertices outside this band don't
+    // contribute to the elevation cut rect. A perpendicular wall extending
+    // 4 m into the back room has its far end well outside this band, so we
+    // only capture the cross-section near the door plane. Band width covers a
+    // typical wall thickness + a small margin for finishes/aggregate layers.
+    const depthHalfWidth = Math.max(frame.thickness, 0.20) + 0.20
+
+    const nearbyWallMeshesAll = getNearbyWallMeshes(context)
+    // Coplanar nearby walls are rendered as part of the host wall (mesh fill +
+    // edges); skipping them here avoids duplicate "schematic rect" overlays.
+    const coplanarHostWallIDs = getCoplanarHostWallExpressIDs(context)
+
+    // Collect strips per (label, meshes, fallbackBoundingBox). The label is
+    // used only for BKP fill resolution; "meshes" / "fallbackBoundingBox"
+    // drive the actual extent measurement.
+    interface Strip { label: 'wall' | 'part'; expressID: number; meshes: THREE.Mesh[]; fallbackBox?: THREE.Box3 | null; bkpKey: number }
+    const strips: Strip[] = []
     for (const wall of context.nearbyWalls) {
-        if (!wall.boundingBox) continue
-        const meshes = [
-            ...nearbyWallMeshes.filter((mesh) => mesh.userData.expressID === wall.expressID),
-            ...getWallAggregatePartMeshesForParent(context, wall.expressID),
-        ]
-        const bounds = measureMeshesOrBoxInAxes(
-            meshes,
-            wall.boundingBox,
-            frame.widthAxis,
-            frame.upAxis,
-            frame.semanticFacing
-        )
+        if (coplanarHostWallIDs.has(wall.expressID)) continue
+        const meshesForWall = nearbyWallMeshesAll.filter((m) => m.userData?.expressID === wall.expressID)
+        strips.push({
+            label: 'wall',
+            expressID: wall.expressID,
+            meshes: meshesForWall,
+            fallbackBox: wall.boundingBox ?? null,
+            bkpKey: wall.expressID,
+        })
+        // Aggregate parts of the nearby wall: render each part as its own
+        // strip. Modellers sometimes attach perpendicular wall stubs on the
+        // OPPOSITE side of the door under the same parent IfcWall — the
+        // parent's bbox doesn't span those parts, so a single strip per
+        // wall misses them entirely (03X27dQWY: wall 52745 at door's right
+        // has parts at door's left forming the left stirnseite).
+        for (const link of context.wallAggregatePartLinks ?? []) {
+            if (link.parentWallExpressID !== wall.expressID) continue
+            const partMeshes = nearbyWallMeshesAll.filter((m) => m.userData?.expressID === link.part.expressID)
+            if (partMeshes.length === 0 && !link.part.boundingBox) continue
+            strips.push({
+                label: 'part',
+                expressID: link.part.expressID,
+                meshes: partMeshes,
+                fallbackBox: link.part.boundingBox ?? null,
+                bkpKey: wall.expressID,
+            })
+        }
+    }
+
+    for (const strip of strips) {
+        let bounds: AxisBounds | null = null
+        if (strip.meshes.length > 0) {
+            bounds = measureMeshesInAxesDepthBand(
+                strip.meshes,
+                frame.widthAxis,
+                frame.upAxis,
+                frame.semanticFacing,
+                originC,
+                depthHalfWidth
+            )
+        }
+        if (!bounds && strip.fallbackBox) {
+            bounds = measureBoundingBoxInAxes(
+                strip.fallbackBox,
+                frame.widthAxis,
+                frame.upAxis,
+                frame.semanticFacing
+            )
+        }
         if (!bounds) continue
         const rect: AxisRect = {
             minA: bounds.minA - originA,
@@ -2034,7 +2245,9 @@ function createSemanticElevationNearbyWallGeometry(
         }
         if (rect.maxA <= rect.minA || rect.maxB <= rect.minB) continue
         const corners = createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, rect.minA, rect.maxA, rect.minB, rect.maxB)
-        appendProjectedFillPolygon(geometry, corners, camera, width, height, options.wallColor, -0.8, 0.65)
+        const wallCfc = context.wallBKP?.get(strip.bkpKey) ?? null
+        const wallFill = resolveWallElevationColor(wallCfc) ?? options.wallColor
+        appendProjectedFillPolygon(geometry, corners, camera, width, height, wallFill, -0.8, 1)
         for (let i = 0; i < corners.length; i++) {
             appendProjectedEdge(geometry, corners[i], corners[(i + 1) % corners.length], camera, width, height, options.lineColor, -0.8, WALL_EDGE_STROKE_FACTOR)
         }
@@ -2079,39 +2292,20 @@ function createProjectedElevationWallBackdropGeometry(
     height: number,
     clipBounds: ProjectedBounds | null,
     options: Required<SVGRenderOptions>,
-    hostWallMeshes: THREE.Mesh[] = [],
-    footprintLocalA: { minA: number; maxA: number } | null = null
+    footprintLocalA: { minA: number; maxA: number } | null = null,
+    wallColorOverride?: string
 ): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     if (!clipBounds) return geometry
 
-    // Clamp the backdrop's vertical extent to the host wall's actual projected
-    // Y range. Otherwise the left/right panels extend the full clip height and
-    // leave a door-width white gap below the door (the 3-panel layout has no
-    // below-door panel). Outside the wall's Y range, slabs/nothing take over.
-    let wallMinY = clipBounds.minY
-    let wallMaxY = clipBounds.maxY
-    if (hostWallMeshes.length > 0) {
-        const bounds = measureMeshesInAxes(
-            hostWallMeshes,
-            frame.widthAxis,
-            frame.upAxis,
-            frame.semanticFacing
-        )
-        if (bounds) {
-            const originB = frame.origin.dot(frame.upAxis)
-            const topPt = frame.origin.clone().add(
-                frame.upAxis.clone().multiplyScalar(bounds.maxB - originB)
-            )
-            const botPt = frame.origin.clone().add(
-                frame.upAxis.clone().multiplyScalar(bounds.minB - originB)
-            )
-            const topPx = projectPoint(topPt, camera, width, height).y
-            const botPx = projectPoint(botPt, camera, width, height).y
-            wallMinY = Math.max(clipBounds.minY, Math.min(topPx, botPx))
-            wallMaxY = Math.min(clipBounds.maxY, Math.max(topPx, botPx))
-        }
-    }
+    // Left/right backdrop panels span the entire clip-band height. The
+    // slab/ceiling strips (drawn at depth -1) layer on top, so letting the
+    // backdrop extend to clipBounds.minY / clipBounds.maxY never visibly
+    // conflicts with the slab band — it just closes the "white gap" above
+    // the host wall where nearby walls get dropped by the back-view
+    // occlusion filter.
+    const wallMinY = clipBounds.minY
+    const wallMaxY = clipBounds.maxY
 
     // Clamp the backdrop's horizontal extent to the real wall footprint along
     // the door's widthAxis. This stops the fill at T-junctions / L-corners /
@@ -2146,9 +2340,10 @@ function createProjectedElevationWallBackdropGeometry(
     // the top-header and bottom-footer panels (often 0.2–0.6 m tall) never
     // drew. Use 1 cm instead so only truly degenerate rects are skipped.
     const MIN_PANEL_DIM_METERS = 0.01
+    const wallColor = wallColorOverride ?? options.wallColor
     for (const panel of panels) {
         if (panel.maxX - panel.minX < MIN_PANEL_DIM_METERS || panel.maxY - panel.minY < MIN_PANEL_DIM_METERS) continue
-        appendProjectedRectPolygon(geometry, panel, options.wallColor, -1.5, 1)
+        appendProjectedRectPolygon(geometry, panel, wallColor, -1.5, 1)
     }
 
     return geometry
@@ -2324,10 +2519,17 @@ function extractMeshSectionSegments(
             return 0
         })
         // When exactly two vertices lie on the cut plane, the shared edge IS the section
-        // edge. This happens often for prismatic wall meshes whose triangulation includes
-        // horizontal edges at the cut height; the intersection walk below would drop them
-        // because it only emits plane-crossing segments. Emit the on-plane edge directly.
+        // edge — but only if the triangle's THIRD vertex is meaningfully off the plane.
+        // For features whose geometry only TANGENTIALLY touches cutY (e.g. a maintenance
+        // opening / revisionsöffnung whose bottom edge sits at 1.80 m without actually
+        // crossing it), the on-plane edge is just a tangent and shouldn't be drawn as a
+        // section. Require ≥ 5 mm out-of-plane to suppress those phantoms.
         if (sides.filter((s) => s === 0).length === 2) {
+            const offPlaneIdx = sides.findIndex((s) => s !== 0)
+            if (offPlaneIdx >= 0) {
+                const offPlaneDistance = Math.abs(verts[offPlaneIdx].y - cutY)
+                if (offPlaneDistance < 0.005) return
+            }
             const onPlane = verts.filter((_, i) => sides[i] === 0)
             registerSegment(
                 new THREE.Vector3(onPlane[0].x, cutY, onPlane[0].z),
@@ -2506,14 +2708,14 @@ function reconstructPolygonsFromSegments(
 }
 
 /**
- * Render a single wall mesh as a set of filled plan-section polygons + crisp
- * outline edges, clipped to the door's plan corridor. Closed loops reconstructed
- * from the mesh section become filled polygons; open chains whose endpoints lie
- * within {@link PLAN_OPEN_CHAIN_NEAR_CLOSE_METERS} in xz are promoted to fills.
- * Remaining open chains are emitted as outline-only polylines.
+ * Render a group of wall meshes (e.g. host wall + its IfcBuildingElementPart
+ * cladding/insulation parts) as one combined plan-section. Segments from every
+ * mesh are MERGED before reconstruction so the seams between parts close into
+ * proper filled polygons instead of fragmenting into outline-only edges (the
+ * "missing cutted buildingelementpart walls" failure for -1UG).
  */
-function addMeshPlanSectionForWall(
-    mesh: THREE.Mesh,
+function addMeshPlanSectionForWallGroup(
+    meshes: THREE.Mesh[],
     cutY: number,
     corridor: PlanSectionCorridor,
     camera: THREE.OrthographicCamera,
@@ -2526,7 +2728,10 @@ function addMeshPlanSectionForWall(
     fillOpacity: number = 1,
     edgeStrokeFactor: number = WALL_EDGE_STROKE_FACTOR
 ): number {
-    const segments = extractMeshSectionSegments(mesh, cutY)
+    const segments: Array<{ a: THREE.Vector3; b: THREE.Vector3 }> = []
+    for (const mesh of meshes) {
+        segments.push(...extractMeshSectionSegments(mesh, cutY))
+    }
     if (segments.length === 0) return 0
     const { closedLoops, openChains } = reconstructPolygonsFromSegments(segments)
 
@@ -2591,27 +2796,34 @@ function addMeshPlanSectionForWall(
 function getPlanSectionCorridor(
     context: DoorContext,
     options: Required<SVGRenderOptions>
-): PlanSectionCorridor {
+): { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] } {
+    const out = { edges: [] as ProjectedEdge[], polygons: [] as ProjectedPolygon[] }
+    const hostMeshes = getHostWallMeshes(context)
+    const nearbyMeshes = getNearbyWallMeshes(context)
+    const wallMeshes = [...hostMeshes, ...nearbyMeshes]
+    if (wallMeshes.length === 0) {
+        return out
+    }
+
+    // Corridor matches plan crop margin: door ± pad in width and depth so section
+    // geometry exists inside the same window that fit/clip uses (not full IFC wall).
     const frame = context.viewFrame
     const widthAxis = frame.widthAxis.clone().normalize()
     const depthAxis = frame.semanticFacing.clone().normalize()
-    const halfDoorWidth = frame.width / 2
     const halfT = frame.thickness / 2
     const planPad = Math.max(options.planCropMarginMeters, 0)
     const wallMetrics = getLocalHostWallPlanMetrics(context)
     const hostWallThickness = wallMetrics?.thickness ?? frame.thickness
-    const lateralExtend = halfDoorWidth + planPad
     const depthHalfSpan = Math.max(halfT, hostWallThickness / 2) + planPad
     const relDepthMin = -depthHalfSpan
     const relDepthMax = depthHalfSpan
-    const originWidth = frame.origin.dot(widthAxis)
     const originDepth = frame.origin.dot(depthAxis)
 
-    return {
+    const corridor: PlanSectionCorridor = {
         widthAxis,
         depthAxis,
-        minWidth: originWidth - halfDoorWidth - lateralExtend,
-        maxWidth: originWidth + halfDoorWidth + lateralExtend,
+        minWidth: originWidth + lateralMinLocal,
+        maxWidth: originWidth + lateralMaxLocal,
         minDepth: originDepth + relDepthMin,
         maxDepth: originDepth + relDepthMax,
     }
@@ -2643,15 +2855,43 @@ function createMeshPlanSectionGeometry(
 
     const corridor = getPlanSectionCorridor(context, options)
 
-    for (const mesh of wallMeshes) {
-        addMeshPlanSectionForWall(
-            mesh,
+    // Plan wall rendering is mesh-only — no bbox under-fill, no synthetic
+    // rects. Closed-loop reconstruction merges segments from the host wall
+    // AND its IfcBuildingElementPart cladding/insulation parts so seams
+    // between parts collapse into one continuous fill polygon (otherwise the
+    // -1UG cladding cuts dropped to outline-only and the wall read as thin
+    // lines). Each wall + its parts forms one group; nearby walls each form
+    // their own group so independent cuts don't merge across rooms.
+    const hostWallCfc = context.hostWall ? context.wallBKP?.get(context.hostWall.expressID) ?? null : null
+    const hostWallCutColor = resolveWallCutColor(hostWallCfc) ?? options.wallColor
+
+    const groups: THREE.Mesh[][] = []
+    if (hostMeshes.length > 0) groups.push(hostMeshes)
+    if (nearbyMeshes.length > 0) {
+        // Group nearby meshes per parent wall via expressID so each adjacent
+        // wall's parts merge with itself but not with another wall.
+        const byParent = new Map<number, THREE.Mesh[]>()
+        const orphan: THREE.Mesh[] = []
+        for (const mesh of nearbyMeshes) {
+            const id = mesh.userData?.expressID
+            if (typeof id !== 'number') { orphan.push(mesh); continue }
+            const arr = byParent.get(id) ?? []
+            arr.push(mesh)
+            byParent.set(id, arr)
+        }
+        for (const meshes of byParent.values()) groups.push(meshes)
+        if (orphan.length > 0) groups.push(orphan)
+    }
+
+    for (const meshes of groups) {
+        addMeshPlanSectionForWallGroup(
+            meshes,
             cutY,
             corridor,
             camera,
             width,
             height,
-            options.wallColor,
+            hostWallCutColor,
             options.lineColor,
             -1,
             out
@@ -2772,8 +3012,10 @@ function createSemanticPlanWallGeometry(
         rects.push(createRectPoints3D(frame.origin, frame.widthAxis, frame.semanticFacing, halfDoorWidth, halfDoorWidth + sideContext, wallMetrics.minDepth, wallMetrics.maxDepth))
     }
 
+    const hostWallCfcPlan = context.hostWall ? context.wallBKP?.get(context.hostWall.expressID) ?? null : null
+    const hostWallPlanColor = resolveWallCutColor(hostWallCfcPlan) ?? options.wallColor
     for (const rect of rects) {
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.wallColor, options.lineColor, -1, 1, WALL_EDGE_STROKE_FACTOR)
+        appendProjectedPolygon(geometry, rect, camera, width, height, hostWallPlanColor, options.lineColor, -1, 1, WALL_EDGE_STROKE_FACTOR)
     }
 
     return geometry
@@ -2803,6 +3045,61 @@ function shouldRenderDeviceInElevation(
 }
 
 const PLAN_CUT_HEIGHT_METERS = 1.8
+
+/**
+ * Single source of truth for the lateral (widthAxis) crop window shared by
+ * plan + elevation. Runs the host wall's mesh-section at cutY and returns
+ * the widthAxis extent of the resulting segments in coordinates LOCAL to
+ * frame.origin. The corridor clamps both views to this same extent so the
+ * door anchor's visible context width is identical in plan and elevation
+ * (eliminates the "Kontext ist nicht gleich breit" misalignment when the
+ * two views are stacked).
+ *
+ * Returns null when the host wall has no triangles crossing cutY (sparse
+ * mesh) — callers fall back to the door-anchored lateralGap.
+ */
+function getSharedLateralExtentLocal(
+    context: DoorContext
+): { minLocal: number; maxLocal: number } | null {
+    const frame = context.viewFrame
+    const cutY = frame.origin.y - frame.height / 2 + PLAN_CUT_HEIGHT_METERS
+    const originW = frame.origin.dot(frame.widthAxis)
+    // Combine all segments from the host wall + its aggregate parts and run
+    // the same reconstruction the plan view does — then take the widthAxis
+    // extent of the reconstructed CLOSED LOOPS only. Loops are the wall's
+    // actual visible cut at cutY; raw segments include phantom triangle
+    // edges from boolean-cut artefacts and aggregate parts that extend past
+    // the rendered footprint. Falls back to all segments if no closed loops
+    // emerge (sparse meshes).
+    const allSegs: Array<{ a: THREE.Vector3; b: THREE.Vector3 }> = []
+    // Include coplanar nearby walls so the corridor extent reflects the FULL
+    // wall in storefront / curtain-wall layouts where the door is hosted by
+    // a tiny stub (03X27dQWY: 8 cm host stub plus 40 m coplanar wall).
+    for (const mesh of getHostAndCoplanarWallMeshes(context)) {
+        allSegs.push(...extractMeshSectionSegments(mesh, cutY))
+    }
+    if (allSegs.length === 0) return null
+    const { closedLoops, openChains } = reconstructPolygonsFromSegments(allSegs)
+    let minLocal = Infinity
+    let maxLocal = -Infinity
+    const collect = (pts: THREE.Vector3[]) => {
+        for (const p of pts) {
+            const w = p.dot(frame.widthAxis) - originW
+            if (w < minLocal) minLocal = w
+            if (w > maxLocal) maxLocal = w
+        }
+    }
+    if (closedLoops.length > 0) {
+        for (const loop of closedLoops) collect(loop)
+    } else {
+        for (const chain of openChains) collect(chain)
+    }
+    if (minLocal === Infinity) return null
+    if (process.env.DEBUG_SHARED_LATERAL === '1') {
+        console.log(`[shared] door=${context.doorId} closedLoops=${closedLoops.length} openChains=${openChains.length} extent=[${minLocal.toFixed(3)}, ${maxLocal.toFixed(3)}]`)
+    }
+    return { minLocal, maxLocal }
+}
 
 function deviceVisibleInPlan(context: DoorContext, device: THREE.Box3): boolean {
     const frame = context.viewFrame
@@ -2872,14 +3169,118 @@ function createSemanticElevationDeviceGeometry(
     const frame = context.viewFrame
     const depthCenter = frame.origin.dot(frame.semanticFacing)
     const hasWallContext = Boolean(context.hostWall || context.wall)
+    const hostWallCfcForDevices = context.hostWall ? context.wallBKP?.get(context.hostWall.expressID) ?? null : null
+    const hostWallElevColorForDevices = resolveWallElevationColor(hostWallCfcForDevices) ?? options.wallColor
+    const allDeviceMeshes = context.detailedGeometry?.deviceMeshes ?? []
 
     for (const device of context.nearbyDevices) {
         if (!shouldRenderDeviceInElevation(context, device.expressID, isBackView)) {
             continue
         }
+        const deviceFill = isSafetyDevice(device.name, context.deviceLayers?.get(device.expressID) ?? null) ? options.safetyColor : options.deviceColor
+
+        // Real mesh path: project the IFC geometry as-is. Honest size from the
+        // model — Gegensprechanlage panel renders as ~20×25cm because that's
+        // the bbox in the elec IFC, intercom-mounted-on-jamb shows the actual
+        // panel footprint, not a thinned re-projection of the world bbox.
+        const deviceMeshes = allDeviceMeshes.filter((m) => m.userData?.expressID === device.expressID)
+        const hasMesh = deviceMeshes.length > 0 && deviceMeshes.some(
+            (m) => (m.geometry?.attributes?.position?.count ?? 0) > 0
+        )
+
+        if (hasMesh) {
+            // 1) Project the mesh
+            const projected = collectProjectedGeometry(
+                deviceMeshes,
+                context,
+                options,
+                camera,
+                width,
+                height,
+                false,
+                1,
+                'camera-facing',
+                false,
+                DEVICE_EDGE_STROKE_FACTOR
+            )
+            // 2) Compute the projected 2D bbox in screen coords for the wall-color
+            // backdrop. Backdrop is a flat rect occluding the host-wall fill so the
+            // device edges read clearly.
+            if (hasWallContext && projected.polygons.length > 0) {
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+                let depthSum = 0, depthCount = 0
+                for (const poly of projected.polygons) {
+                    for (const pt of poly.points) {
+                        if (pt.x < minX) minX = pt.x
+                        if (pt.x > maxX) maxX = pt.x
+                        if (pt.y < minY) minY = pt.y
+                        if (pt.y > maxY) maxY = pt.y
+                    }
+                    depthSum += poly.depth
+                    depthCount++
+                }
+                if (depthCount > 0 && maxX - minX > 0.5 && maxY - minY > 0.5) {
+                    geometry.polygons.push({
+                        points: [
+                            { x: minX, y: minY },
+                            { x: maxX, y: minY },
+                            { x: maxX, y: maxY },
+                            { x: minX, y: maxY },
+                        ],
+                        color: hostWallElevColorForDevices,
+                        depth: depthSum / depthCount + 0.001,
+                        layer: -1,
+                        skipClip: true,
+                        fillOpacity: 1,
+                    })
+                }
+            }
+            // 3) Override device polygon fill, mark skipClip so wall-clip
+            // bounds don't crop devices on the corridor edge.
+            for (const poly of projected.polygons) {
+                poly.color = deviceFill
+                poly.fillOpacity = 1
+                poly.skipClip = true
+            }
+            geometry.polygons.push(...projected.polygons)
+
+            // Silhouette outline: 2D convex hull of all projected vertices.
+            // This gives the device's outer outline without showing internal
+            // mesh seams (button details, recessed features). Plan keeps the
+            // full mesh edges (the cut requires the inner line work).
+            const allPoints: { x: number; y: number }[] = []
+            for (const poly of projected.polygons) {
+                for (const pt of poly.points) allPoints.push(pt)
+            }
+            const hull = convexHull2D(allPoints)
+            if (hull.length >= 2) {
+                let depthSum = 0, depthCount = 0, layerVal = 1
+                for (const poly of projected.polygons) {
+                    depthSum += poly.depth
+                    depthCount++
+                    layerVal = poly.layer ?? layerVal
+                }
+                const depth = depthCount > 0 ? depthSum / depthCount - 0.001 : -1
+                for (let i = 0; i < hull.length; i++) {
+                    const a = hull[i]
+                    const b = hull[(i + 1) % hull.length]
+                    geometry.edges.push({
+                        x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+                        color: options.lineColor,
+                        depth,
+                        layer: layerVal,
+                        skipClip: true,
+                        strokeWidthFactor: DEVICE_EDGE_STROKE_FACTOR,
+                    })
+                }
+            }
+            continue
+        }
+
+        // Fallback: no mesh available — synthesize a rect from the bbox so the
+        // device still shows up. Same logic as before v12.
         const deviceBox = device.boundingBox
         if (!deviceBox) continue
-
         const bounds = measureBoundingBoxInAxes(deviceBox, frame.widthAxis, frame.upAxis, frame.semanticFacing)
         const rectWidth = Math.max(bounds.maxA - bounds.minA, 0.05)
         const rectHeight = Math.max(bounds.maxB - bounds.minB, 0.05)
@@ -2903,7 +3304,7 @@ function createSemanticElevationDeviceGeometry(
             const backdropDepth = projectedBackdrop.reduce((sum, point) => sum + point.z, 0) / projectedBackdrop.length
             geometry.polygons.push({
                 points: projectedBackdrop.map((point) => ({ x: point.x, y: point.y })),
-                color: options.wallColor,
+                color: hostWallElevColorForDevices,
                 depth: backdropDepth,
                 layer: -1,
                 skipClip: true,
@@ -2920,7 +3321,7 @@ function createSemanticElevationDeviceGeometry(
             -rectHeight / 2,
             rectHeight / 2
         )
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 1, 1, DEVICE_EDGE_STROKE_FACTOR)
+        appendProjectedPolygon(geometry, rect, camera, width, height, deviceFill, options.lineColor, 1, 1, DEVICE_EDGE_STROKE_FACTOR)
         const lastPolygon = geometry.polygons[geometry.polygons.length - 1]
         if (lastPolygon) {
             lastPolygon.skipClip = true
@@ -2944,14 +3345,51 @@ function createSemanticPlanDeviceGeometry(
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     const frame = context.viewFrame
     const depthCap = Math.max(frame.thickness * 0.9, 0.05)
+    const allDeviceMeshes = context.detailedGeometry?.deviceMeshes ?? []
 
     for (const device of context.nearbyDevices) {
         if (!shouldRenderDeviceInPlan(context, device.expressID)) {
             continue
         }
+        const deviceFill = isSafetyDevice(device.name, context.deviceLayers?.get(device.expressID) ?? null) ? options.safetyColor : options.deviceColor
+
+        // Plan view is a horizontal cut at cutHeight. We honour the real mesh
+        // by projecting the mesh edges/polygons (orthographic top-down camera
+        // already in place). Mesh extent in the up-axis doesn't affect the
+        // horizontal projection, so the cut-height is implicitly satisfied.
+        const deviceMeshes = allDeviceMeshes.filter((m) => m.userData?.expressID === device.expressID)
+        const hasMesh = deviceMeshes.length > 0 && deviceMeshes.some(
+            (m) => (m.geometry?.attributes?.position?.count ?? 0) > 0
+        )
+        if (hasMesh) {
+            const projected = collectProjectedGeometry(
+                deviceMeshes,
+                context,
+                options,
+                camera,
+                width,
+                height,
+                false,
+                0,
+                'camera-facing',
+                false,
+                DEVICE_EDGE_STROKE_FACTOR
+            )
+            for (const poly of projected.polygons) {
+                poly.color = deviceFill
+                poly.fillOpacity = 1
+            }
+            for (const edge of projected.edges) {
+                edge.color = options.lineColor
+            }
+            geometry.polygons.push(...projected.polygons)
+            geometry.edges.push(...projected.edges)
+            continue
+        }
+
+        // Fallback: synthesize a rect from bbox.
         const deviceBox = device.boundingBox
         if (!deviceBox) continue
-
         const bounds = measureBoundingBoxInAxes(deviceBox, frame.widthAxis, frame.semanticFacing, frame.upAxis)
         const rectWidth = Math.max(bounds.maxA - bounds.minA, 0.05)
         const rectDepth = Math.min(Math.max(bounds.maxB - bounds.minB, 0.02), depthCap)
@@ -2970,7 +3408,7 @@ function createSemanticPlanDeviceGeometry(
             -rectDepth / 2,
             rectDepth / 2
         )
-        appendProjectedPolygon(geometry, rect, camera, width, height, options.deviceColor, options.lineColor, 0, 1, DEVICE_EDGE_STROKE_FACTOR)
+        appendProjectedPolygon(geometry, rect, camera, width, height, deviceFill, options.lineColor, 0, 1, DEVICE_EDGE_STROKE_FACTOR)
     }
 
     return geometry
@@ -3031,7 +3469,51 @@ function getBoundsFromProjectedGeometry(
     return { minX, maxX, minY, maxY }
 }
 
+interface EdgeClipResult {
+    edge: ProjectedEdge
+    /** True iff the edge was modified by clipping (one or both endpoints moved
+     * because the edge crossed the bounds). False if the edge was already
+     * fully inside bounds — including the degenerate case of a vertical edge
+     * that natively lives exactly at minX/maxX, which must NOT be confused
+     * with a "closing line" clip artifact. */
+    clippedLaterally: boolean
+}
+
 function clipEdgeToBounds(edge: ProjectedEdge, bounds: ProjectedBounds): ProjectedEdge | null {
+    const result = clipEdgeToBoundsResult(edge, bounds)
+    return result?.edge ?? null
+}
+
+/**
+ * 2D convex hull (Andrew's monotone chain). Returns hull vertices in CCW
+ * order. Used by the elevation device renderer to draw the device silhouette
+ * outline from the projected mesh vertices, hiding internal mesh seams
+ * (buttons, recesses) while keeping the outer outline. Empty / degenerate
+ * inputs return as-is.
+ */
+function convexHull2D(points: { x: number; y: number }[]): { x: number; y: number }[] {
+    if (points.length < 3) return [...points]
+    const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y)
+    const cross = (
+        O: { x: number; y: number },
+        A: { x: number; y: number },
+        B: { x: number; y: number }
+    ) => (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x)
+    const lower: { x: number; y: number }[] = []
+    for (const p of sorted) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop()
+        lower.push(p)
+    }
+    const upper: { x: number; y: number }[] = []
+    for (let i = sorted.length - 1; i >= 0; i--) {
+        const p = sorted[i]
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop()
+        upper.push(p)
+    }
+    return [...lower.slice(0, -1), ...upper.slice(0, -1)]
+}
+
+function clipEdgeToBoundsResult(edge: ProjectedEdge, bounds: ProjectedBounds): EdgeClipResult | null {
     let t0 = 0
     let t1 = 1
 
@@ -3055,22 +3537,125 @@ function clipEdgeToBounds(edge: ProjectedEdge, bounds: ProjectedBounds): Project
         return true
     }
 
+    // Track whether each lateral test moved t0/t1 (i.e., the edge crossed the
+    // lateral bound). The vertical (y) tests don't matter for "closing line"
+    // detection — that artifact only appears at minX/maxX.
+    const t0Before = t0
+    const t1Before = t1
+    const lateralOk = clipTest(-dx, edge.x1 - bounds.minX) && clipTest(dx, bounds.maxX - edge.x1)
+    const clippedLaterally = lateralOk && (t0 > t0Before + 1e-9 || t1 < t1Before - 1e-9)
+    if (!lateralOk) return null
     if (
-        !clipTest(-dx, edge.x1 - bounds.minX)
-        || !clipTest(dx, bounds.maxX - edge.x1)
-        || !clipTest(-dy, edge.y1 - bounds.minY)
+        !clipTest(-dy, edge.y1 - bounds.minY)
         || !clipTest(dy, bounds.maxY - edge.y1)
     ) {
         return null
     }
 
     return {
-        ...edge,
-        x1: edge.x1 + t0 * dx,
-        y1: edge.y1 + t0 * dy,
-        x2: edge.x1 + t1 * dx,
-        y2: edge.y1 + t1 * dy,
+        edge: {
+            ...edge,
+            x1: edge.x1 + t0 * dx,
+            y1: edge.y1 + t0 * dy,
+            x2: edge.x1 + t1 * dx,
+            y2: edge.y1 + t1 * dy,
+        },
+        clippedLaterally,
     }
+}
+
+/**
+ * Subtract `rect` from `edge`: returns 0–2 segments of the original edge that
+ * fall OUTSIDE the rect. Edges entirely inside the rect produce []; edges
+ * that don't touch the rect produce the input edge unchanged. Used to occlude
+ * background mesh edges (e.g. host wall jamb verticals continuing through
+ * the floor build-up below the door bottom) by foreground polygon AABBs
+ * (slab/ceiling/perpendicular wall rects). Mirrors the user's mental model
+ * for the elevation: lines "behind" a foreground element are hidden.
+ */
+function subtractRectFromEdge(edge: ProjectedEdge, rect: ProjectedBounds): ProjectedEdge[] {
+    const dx = edge.x2 - edge.x1
+    const dy = edge.y2 - edge.y1
+
+    let t0 = 0
+    let t1 = 1
+
+    const test = (p: number, q: number): boolean => {
+        if (Math.abs(p) < 1e-9) return q >= 0
+        const r = q / p
+        if (p < 0) {
+            if (r > t1) return false
+            if (r > t0) t0 = r
+        } else {
+            if (r < t0) return false
+            if (r < t1) t1 = r
+        }
+        return true
+    }
+
+    if (
+        !test(-dx, edge.x1 - rect.minX)
+        || !test(dx, rect.maxX - edge.x1)
+        || !test(-dy, edge.y1 - rect.minY)
+        || !test(dy, rect.maxY - edge.y1)
+    ) {
+        return [edge]
+    }
+
+    const out: ProjectedEdge[] = []
+    const TOL = 1e-3
+    if (t0 > TOL) {
+        out.push({
+            ...edge,
+            x2: edge.x1 + t0 * dx,
+            y2: edge.y1 + t0 * dy,
+        })
+    }
+    if (t1 < 1 - TOL) {
+        out.push({
+            ...edge,
+            x1: edge.x1 + t1 * dx,
+            y1: edge.y1 + t1 * dy,
+        })
+    }
+    return out
+}
+
+function getPolygonAABB(points: { x: number; y: number }[]): ProjectedBounds | null {
+    if (points.length === 0) return null
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+    for (const p of points) {
+        if (p.x < minX) minX = p.x
+        if (p.x > maxX) maxX = p.x
+        if (p.y < minY) minY = p.y
+        if (p.y > maxY) maxY = p.y
+    }
+    if (maxX - minX < 1e-3 || maxY - minY < 1e-3) return null
+    return { minX, maxX, minY, maxY }
+}
+
+function occludeEdgesByPolygons(
+    edges: ProjectedEdge[],
+    occluderPolygons: ProjectedPolygon[]
+): ProjectedEdge[] {
+    if (edges.length === 0 || occluderPolygons.length === 0) return edges
+    const rects: ProjectedBounds[] = []
+    for (const poly of occluderPolygons) {
+        const aabb = getPolygonAABB(poly.points)
+        if (aabb) rects.push(aabb)
+    }
+    if (rects.length === 0) return edges
+    let working = edges
+    for (const rect of rects) {
+        const next: ProjectedEdge[] = []
+        for (const edge of working) {
+            for (const seg of subtractRectFromEdge(edge, rect)) {
+                next.push(seg)
+            }
+        }
+        working = next
+    }
+    return working
 }
 
 function clipPolygonToBounds(points: { x: number; y: number }[], bounds: ProjectedBounds): { x: number; y: number }[] {
@@ -3152,25 +3737,42 @@ interface RenderMeta {
     planDoorBounds?: ProjectedBounds
     planWallBandBounds?: { minY: number; maxY: number }
     storeyMarkerProjectedY?: number
+    /** Door frame origin projected into the current view (x, y). Used in fixed-scale
+     * mode to anchor the door to the canvas centre so front/back/plan agree on its
+     * horizontal (and elevation-vertical) position. */
+    doorAnchor?: { x: number; y: number }
 }
 
-function resolveSvgViewTransform(
+/**
+ * Pick the drawing scale + offsets for a view.
+ *
+ * Elevations: scale is fit-to-HEIGHT per door so the slab-to-slab clip band
+ * (10 cm upper slab + floor + 10 cm lower slab) always fills the available
+ * picture height exactly. Content top sits at `topPad` (narrow breathing
+ * strip) and content bottom lands on the title-block separator. The door
+ * frame origin is anchored to the canvas horizontal centre so front/back/
+ * plan all agree on the door's X.
+ *
+ * Plan: fit-to-bounds centred, either inheriting the front's scale via
+ * `sharedDrawingScale` (legacy plumbing — ignored when a doorAnchor is
+ * provided) or computing its own natural fit. Door X still anchors to canvas
+ * centre.
+ */
+function computeViewTransform(
     fitBounds: ProjectedBounds,
     options: Required<SVGRenderOptions>,
     context: DoorContext | null,
-    sharedDrawingScale?: number,
-    viewType: 'Front' | 'Back' | 'Plan' | '' = ''
+    sharedDrawingScale: number | undefined,
+    viewType: 'Front' | 'Back' | 'Plan' | '',
+    doorAnchor: { x: number; y: number } | undefined
 ): {
     scale: number
     offsetX: number
     offsetY: number
     viewHeight: number
 } {
-    // Viewport metrics depend on which view is rendered (legend rows and visible devices
-    // differ between Front/Back/Plan). Passing the actual viewType keeps the precomputed
-    // scale consistent with the eventual `generateSVGString` call, otherwise the elevation
-    // scale can diverge from the plan scale whenever device/legend visibility changes.
-    const { viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(options, context, viewType)
+    const metrics = getSvgViewportMetrics(options, context, viewType)
+    const { viewHeight, sidePad, topPad, availWidth, availHeight } = metrics
     const contentWidth = fitBounds.maxX - fitBounds.minX
     const contentHeight = fitBounds.maxY - fitBounds.minY
     const naturalScale = Math.min(
@@ -3182,33 +3784,6 @@ function resolveSvgViewTransform(
     const scaledHeight = contentHeight * scale
     const offsetX = padding + (availWidth - scaledWidth) / 2
     const offsetY = padding + (availHeight - scaledHeight) / 2
-    // #region agent log
-    fetch(DEBUG_INGEST_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': DEBUG_SESSION_ID },
-        body: JSON.stringify({
-            sessionId: DEBUG_SESSION_ID,
-            runId: process.env.DEBUG_RUN_ID ?? 'pre-fix',
-            hypothesisId: 'H2-dynamic-scale-fit',
-            location: 'lib/svg-renderer.ts:resolveSvgViewTransform',
-            message: 'Viewport transform and scale policy',
-            data: {
-                viewType,
-                contentWidth,
-                contentHeight,
-                availWidth,
-                availHeight,
-                naturalScale,
-                scale,
-                usesSharedScale: sharedDrawingScale !== undefined,
-                padding,
-                offsetX,
-                offsetY,
-            },
-            timestamp: Date.now(),
-        }),
-    }).catch(() => {})
-    // #endregion
     return { scale, offsetX, offsetY, viewHeight }
 }
 
@@ -3252,12 +3827,39 @@ function clipProjectedGeometryToBounds(
         }
     }
 
+    // "Closing line" artifact: when an edge crossed the lateral crop and got
+    // clipped down to a vertical segment lying ON the crop boundary, that
+    // segment is a clip artifact (not real wall geometry) and shouldn't draw
+    // as a vertical line at the corridor edge.
+    //
+    // CRITICAL: a perpendicular-wall edge that natively lives at exactly
+    // minX/maxX (e.g. the back face of a wall whose end aligns with the
+    // corridor) must NOT be dropped — that edge IS real geometry, and dropping
+    // it produces "missing wall" reports. We distinguish artifact from real
+    // geometry by tracking whether clipping moved the edge's endpoints.
+    const BOUNDARY_EPS = 0.001
+    const isOnLateralBoundary = (e: ProjectedEdge): boolean => {
+        if (Math.abs(e.x1 - e.x2) > BOUNDARY_EPS) return false
+        const onMinX =
+            Math.abs(e.x1 - bounds.minX) < BOUNDARY_EPS
+            && Math.abs(e.x2 - bounds.minX) < BOUNDARY_EPS
+        const onMaxX =
+            Math.abs(e.x1 - bounds.maxX) < BOUNDARY_EPS
+            && Math.abs(e.x2 - bounds.maxX) < BOUNDARY_EPS
+        return onMinX || onMaxX
+    }
+
     const edges: ProjectedEdge[] = []
     for (const edge of geometry.edges) {
-        const clippedEdge = clipEdgeToBounds(edge, bounds)
-        if (clippedEdge) {
-            edges.push({ ...clippedEdge, skipClip: true })
-        }
+        const clipResult = clipEdgeToBoundsResult(edge, bounds)
+        if (!clipResult) continue
+        // Drop only if the edge lies on the lateral boundary AND clipping
+        // moved it there (artifact from cropping content that originally
+        // extended past the crop). Native vertical edges at the boundary
+        // — perpendicular wall back faces, frame returns aligned to the
+        // corridor end — pass through.
+        if (clipResult.clippedLaterally && isOnLateralBoundary(clipResult.edge)) continue
+        edges.push({ ...clipResult.edge, skipClip: true })
     }
 
     const polygons: ProjectedPolygon[] = []
@@ -3284,30 +3886,35 @@ function getElevationHostClipBounds(
     if (!bounds) return null
 
     const frame = context.viewFrame
-    // Section-crop policy: show exactly 10 cm of the STRUCTURAL slab at the
-    // top (underside of the upper slab) and bottom (top surface of the lower
-    // slab, below any floor build-up / Unterlagsboden). Falls back to the
-    // old gap-based reveal when no structural slab was picked for this door.
+    // Recenter the horizontal viewport slice on the door anchor. `getViewportClipBounds`
+    // centers the 4 m canvas window on the raw fit midpoint, but nearby geometry
+    // (long walls, distant slabs) can push that midpoint far from the door, leaving
+    // the door outside the canvas after the lateral intersect below. Anchoring the
+    // viewport on the door guarantees the door stays inside the rendered window.
+    const doorAnchorProjected = projectPoint(frame.origin, camera, width, height)
+    const canvasWidthMeters = options.width / FIXED_PX_PER_METER
+    bounds.minX = doorAnchorProjected.x - canvasWidthMeters / 2
+    bounds.maxX = doorAnchorProjected.x + canvasWidthMeters / 2
+    // Section-crop policy: 10 cm into the STRUCTURAL slab below (top face
+    // minus 10 cm) at bottom, 10 cm into the STRUCTURAL slab above (underside
+    // plus 10 cm) at top. `getStructuralSlabFaceDy` skips
+    // IFCBUILDINGELEMENTPART (floor build-up / Unterlagsboden) so the
+    // reference is the real concrete slab, not the finish layer. Falls back
+    // to a 10 cm reveal below the door threshold when no structural slab is
+    // detected for this door's storey.
     const structAboveDy = getStructuralSlabFaceDy(context, 'above')
     const structBelowDy = getStructuralSlabFaceDy(context, 'below')
-
-    let topDy: number
-    if (structAboveDy != null) {
-        topDy = structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS
-    } else {
-        const topGap = getElevationTopContextGapMeters(context)
-        const topReveal = THREE.MathUtils.clamp(frame.thickness * 0.75, 0.08, 0.18)
-        topDy = frame.height / 2 + topGap + topReveal
-    }
-
-    let bottomDy: number
-    if (structBelowDy != null) {
-        bottomDy = structBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
-    } else {
-        const bottomGap = getElevationBottomContextGapMeters(context)
-        const bottomReveal = THREE.MathUtils.clamp(frame.thickness * 0.75, 0.08, 0.18)
-        bottomDy = -frame.height / 2 - bottomGap - bottomReveal
-    }
+    const bottomDy = structBelowDy != null
+        ? structBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
+        : -frame.height / 2 - STRUCTURAL_SLAB_INTRUSION_METERS
+    // Total content capped at 3.5 m above the bottom reference so edge storeys
+    // (1 UG basement, 4 OG roof deck) with no slab above — or a slab further
+    // than 3.5 m — still produce a consistent canvas fill.
+    const STOREY_CONTENT_HEIGHT_METERS = 3.5
+    const topCapDy = bottomDy + STOREY_CONTENT_HEIGHT_METERS
+    let topDy = structAboveDy != null
+        ? Math.min(structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS, topCapDy)
+        : topCapDy
 
     const topPoint = frame.origin.clone().add(frame.upAxis.clone().multiplyScalar(topDy))
     const bottomPoint = frame.origin.clone().add(frame.upAxis.clone().multiplyScalar(bottomDy))
@@ -3321,19 +3928,27 @@ function getElevationHostClipBounds(
     bounds.minY = Math.min(projectedTop.y, projectedBottom.y)
     bounds.maxY = Math.max(projectedTop.y, projectedBottom.y)
 
-    // Clamp horizontal extent to a tight window around the door so long host
-    // walls, nearby-door bands or slab edges running across the storey cannot
-    // stretch the frustum horizontally. The lateral window is sized to still
-    // reveal an adjacent door + small wall reveal on each side (~1.5-2 m for
-    // a standard 1 m door, ~door-width either side for wide curtain-wall
-    // doors), but no further.
-    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.9, 1.2, 2.5)
-    const leftPoint = frame.origin.clone().add(
-        frame.widthAxis.clone().multiplyScalar(-frame.width / 2 - lateralGap)
-    )
-    const rightPoint = frame.origin.clone().add(
-        frame.widthAxis.clone().multiplyScalar(frame.width / 2 + lateralGap)
-    )
+    // Lateral clamp shared with plan corridor — `getSharedLateralExtentLocal`
+    // returns the host wall's mesh-cut widthAxis extent at cutY, exactly
+    // what plan visibly renders. Both views clip to that so a perpendicular
+    // T-junction stub past the host wall's end (the "bottom-left context"
+    // case) gets cropped from both. Fall back to door-anchored lateralGap
+    // when no mesh section is available, capped at lateralGap so very long
+    // partitions still bound the elevation.
+    const halfDoorWidth = frame.width / 2
+    const lateralGap = THREE.MathUtils.clamp(frame.width * 0.5, 0.5, 1.5)
+    const sharedExtent = getSharedLateralExtentLocal(context)
+    let localMinW: number
+    let localMaxW: number
+    if (sharedExtent) {
+        localMinW = Math.min(Math.max(sharedExtent.minLocal, -halfDoorWidth - lateralGap), -halfDoorWidth)
+        localMaxW = Math.max(Math.min(sharedExtent.maxLocal, halfDoorWidth + lateralGap), halfDoorWidth)
+    } else {
+        localMinW = -halfDoorWidth - lateralGap
+        localMaxW = halfDoorWidth + lateralGap
+    }
+    const leftPoint = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(localMinW))
+    const rightPoint = frame.origin.clone().add(frame.widthAxis.clone().multiplyScalar(localMaxW))
     const projectedLeft = projectPoint(leftPoint, camera, width, height)
     const projectedRight = projectPoint(rightPoint, camera, width, height)
     const lateralMin = Math.min(projectedLeft.x, projectedRight.x)
@@ -3449,10 +4064,16 @@ function projectStoreyMarkerLevelY(
     width: number,
     height: number
 ): number {
+    const offset = getStoreyMarkerLevelOffsetMeters(context)
     const markerPoint = context.viewFrame.origin.clone().add(
-        context.viewFrame.upAxis.clone().multiplyScalar(getStoreyMarkerLevelOffsetMeters(context))
+        context.viewFrame.upAxis.clone().multiplyScalar(offset)
     )
-    return projectPoint(markerPoint, camera, width, height).y
+    const projected = projectPoint(markerPoint, camera, width, height)
+    if (process.env.DEBUG_MARKER === '1') {
+        const originB = context.viewFrame.origin.dot(context.viewFrame.upAxis)
+        console.log(`[marker] door=${context.doorId} storey=${context.storeyName} storeyElevation=${context.storeyElevation} originB=${originB.toFixed(3)} offset=${offset.toFixed(3)} markerWorld.y=${markerPoint.y.toFixed(2)}`)
+    }
+    return projected.y
 }
 
 function renderStoreyMarkerSvg(
@@ -3518,6 +4139,9 @@ function getSvgViewportMetrics(
     titleBlockHeight: number
     viewHeight: number
     padding: number
+    sidePad: number
+    topPad: number
+    bottomPad: number
     availWidth: number
     availHeight: number
 } {
@@ -3535,34 +4159,6 @@ function getSvgViewportMetrics(
     const padding = 80
     const availWidth = options.width - padding * 2
     const availHeight = viewHeight - padding * 2
-    // #region agent log
-    fetch(DEBUG_INGEST_ENDPOINT, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': DEBUG_SESSION_ID },
-        body: JSON.stringify({
-            sessionId: DEBUG_SESSION_ID,
-            runId: process.env.DEBUG_RUN_ID ?? 'pre-fix',
-            hypothesisId: 'H4-titleblock-centering',
-            location: 'lib/svg-renderer.ts:getSvgViewportMetrics',
-            message: 'Viewport metrics including title-block impact',
-            data: {
-                viewType,
-                showLabels: options.showLabels,
-                showLegend: options.showLegend,
-                hasDevices,
-                hasWall,
-                hasSlabs,
-                labelLines,
-                legendLines,
-                titleBlockHeight,
-                viewHeight,
-                availWidth,
-                availHeight,
-            },
-            timestamp: Date.now(),
-        }),
-    }).catch(() => {})
-    // #endregion
     return { titleBlockHeight, viewHeight, padding, availWidth, availHeight }
 }
 
@@ -3608,12 +4204,15 @@ function collectFrontElevationFitGeometry(
     const margin = Math.max(opts.margin, 0.25)
     const structAboveDy = getStructuralSlabFaceDy(context, 'above')
     const structBelowDy = getStructuralSlabFaceDy(context, 'below')
-    const topExt = structAboveDy != null
-        ? Math.max(structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS - frame.height / 2, 0)
-        : 0
-    const botExt = structBelowDy != null
-        ? Math.max(-structBelowDy + STRUCTURAL_SLAB_INTRUSION_METERS - frame.height / 2, 0)
-        : 0
+    const bottomDy = structBelowDy != null
+        ? structBelowDy - STRUCTURAL_SLAB_INTRUSION_METERS
+        : -frame.height / 2 - STRUCTURAL_SLAB_INTRUSION_METERS
+    const topCapDy = bottomDy + 3.5
+    const topDy = structAboveDy != null
+        ? Math.min(structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS, topCapDy)
+        : topCapDy
+    const topExt = Math.max(topDy - frame.height / 2, 0)
+    const botExt = Math.max(-bottomDy - frame.height / 2, 0)
     const { camera, frustumWidth, frustumHeight } = createElevationOrthographicCamera(
         frame,
         margin,
@@ -3635,19 +4234,13 @@ function collectFrontElevationFitGeometry(
     return elevationHostClipBounds ? boundsToFitGeometry(elevationHostClipBounds) : fitGeometry
 }
 
-function computeFrontElevationScale(context: DoorContext, opts: Required<SVGRenderOptions>): number | undefined {
-    const fit = collectFrontElevationFitGeometry(context, opts)
-    if (!fit) {
-        return undefined
-    }
-    const fitBounds = getBoundsFromProjectedGeometry(fit.edges, fit.polygons)
-    if (!fitBounds) {
-        return undefined
-    }
-    const { availWidth, availHeight } = getSvgViewportMetrics(opts, context, 'Front')
-    const contentWidth = fitBounds.maxX - fitBounds.minX
-    const contentHeight = fitBounds.maxY - fitBounds.minY
-    return Math.min(availWidth / (contentWidth || 1), availHeight / (contentHeight || 1))
+function computeFrontElevationScale(_context: DoorContext, _opts: Required<SVGRenderOptions>): number | undefined {
+    // The front elevation always renders at FIXED_PX_PER_METER (see
+    // `computeViewTransform` for non-Plan views). Plan must match so the door
+    // sits at exactly the same canvas size — otherwise stacking plan above
+    // elevation left-aligned shows the door drifting (especially in -1 UG
+    // where the storey-clip content height makes natural-fit ≠ FIXED).
+    return FIXED_PX_PER_METER
 }
 
 interface WallRevealRect {
@@ -3884,7 +4477,7 @@ function generateSVGString(
     const hasSlabs = hasVisibleSlabsForView(renderMeta.context, currentViewType)
     const showLegendActual = showLegend && (hasDevices || hasWall || hasSlabs)
 
-    const { titleBlockHeight, viewHeight, padding, availWidth, availHeight } = getSvgViewportMetrics(
+    const { titleBlockHeight, viewHeight } = getSvgViewportMetrics(
         options,
         renderMeta.context,
         currentViewType
@@ -3939,17 +4532,17 @@ function generateSVGString(
     const contentWidth = maxX - minX
     const contentHeight = maxY - minY
 
-    const naturalScale = Math.min(
-        availWidth / (contentWidth || 1),
-        availHeight / (contentHeight || 1)
+    const { scale, offsetX, offsetY } = computeViewTransform(
+        { minX, maxX, minY, maxY },
+        options,
+        renderMeta.context,
+        renderMeta.sharedDrawingScale,
+        currentViewType,
+        renderMeta.doorAnchor
     )
-    const scale = renderMeta.sharedDrawingScale ?? naturalScale
 
-    // Calculate offset to center content in the view area
     const scaledWidth = contentWidth * scale
     const scaledHeight = contentHeight * scale
-    const offsetX = padding + (availWidth - scaledWidth) / 2
-    const offsetY = padding + (availHeight - scaledHeight) / 2
 
     // Transform function
     const transformX = (x: number) => (x - minX) * scale + offsetX
@@ -4143,14 +4736,24 @@ function renderTitleBlock(
         }
 
         if (hasWall) {
-            items.push({ color: options.wallColor, text: 'Wand' })
+            const legendHostCfc = context?.hostWall ? context.wallBKP?.get(context.hostWall.expressID) ?? null : null
+            const legendWallColor = viewType === 'Plan'
+                ? resolveWallCutColor(legendHostCfc) ?? options.wallColor
+                : resolveWallElevationColor(legendHostCfc) ?? options.wallColor
+            items.push({ color: legendWallColor, text: 'Wand' })
         }
         if (hasSlabs && (!hasWall || options.floorSlabColor !== options.wallColor)) {
             items.push({ color: options.floorSlabColor, text: 'Decke' })
         }
 
         if (hasDevices) {
-            items.push({ color: options.deviceColor, text: 'Elektro' })
+            const visibleDevices = context?.nearbyDevices ?? []
+            const isSafe = (d: { expressID: number; name?: string | null }) =>
+                isSafetyDevice(d.name ?? null, context?.deviceLayers?.get(d.expressID) ?? null)
+            const hasElectrical = visibleDevices.some((d) => !isSafe(d))
+            const hasSafety = visibleDevices.some((d) => isSafe(d))
+            if (hasElectrical) items.push({ color: options.deviceColor, text: 'Elektro' })
+            if (hasSafety) items.push({ color: options.safetyColor, text: 'Sicherheit' })
         }
 
         for (const item of items) {
@@ -4286,7 +4889,11 @@ export async function renderDoorElevationSVG(
     isBackView: boolean = false,
     options: SVGRenderOptions = {}
 ): Promise<string> {
-    const opts = normalizeRenderOptions(options)
+    // Elevation door-leaf colour depends on the door's BKP / material class
+    // (CFC 2720 → anthrazit, 2730 → hellbraun, unknown → hellgrau). Caller
+    // overrides via `options.doorColor` still win.
+    const bkpDoorColor = resolveElevationDoorColor(context.csetStandardCH?.cfcBkpCccBcc)
+    const opts = normalizeRenderOptions({ doorColor: bkpDoorColor, ...options })
     const { width: doorWidth, height: doorHeight } = context.viewFrame
 
     // Check if we have detailed geometry
@@ -4368,16 +4975,31 @@ function collectDoorMeshGeometry(
 
     // Fills: every door sub-mesh (frame, leaf, glazing…) projects its real
     // footprint so the door reads as a continuous shape in the door-colour.
+    // Frame / header / jamb sub-meshes paint anthrazit (metal frame) when
+    // the door is metal or has no BKP, since real-world frames around glass
+    // / steel doors are metal. Wood-BKP doors get a wood frame too — typical
+    // residential / interior construction is wood-on-wood, not wood leaf in
+    // a metal frame. Glazing keeps glass colour. Leaf keeps the BKP-resolved
+    // doorColor.
     // Edges: web-ifc splits the door into several sub-meshes and each one
     // contributes its own silhouette rectangle, which layered on top of each
     // other looked like multiple schematic frame outlines. Instead, draw ONE
     // outer silhouette (union of all door meshes, via a frame-axis-aligned
     // rect from the real projected footprint) + the leaf silhouette inside.
+    const doorBKPCategory = classifyDoorBKP(context.csetStandardCH?.cfcBkpCccBcc)
+    const frameColor = doorBKPCategory === 'wood'
+        ? COLORS.elevation.door.byBKP.wood
+        : COLORS.elevation.door.byBKP.metal
     for (const mesh of doorMeshes) {
         const expressID = mesh.userData.expressID
         const style = getMeshPolygonStyle(mesh, expressID, context, options, true)
-        const color = style.color
+        const isGlazing = isLikelyGlazingPanelMesh(mesh)
+        const isLeaf = leafMeshes.has(mesh)
+        let color = style.color
         const fillOpacity = style.fillOpacity ?? 1
+        if (!isGlazing && !isLeaf && expressID === context.door.expressID) {
+            color = frameColor
+        }
         const posCount = mesh.geometry?.attributes?.position?.count || 0
         if (posCount === 0) continue
         if (options.showFills) {
@@ -4614,10 +5236,17 @@ function filterContextForElevationOcclusion(
     }
 
     /**
-     * Classify a bbox against the wall plane:
-     *  - returns -1 if entirely on the -normal side (back-room side)
-     *  - returns +1 if entirely on the +normal side (front-room side)
-     *  - returns  0 if it straddles the plane within tolerance
+     * Classify a bbox against the wall plane.
+     *  -1 / +1 = mostly on that side, drop on the opposite view.
+     *   0     = truly straddling (wall aggregate, door sub-mesh) — keep both.
+     *
+     * We use the bbox CENTER as the dominant side: an element that attaches to
+     * the host wall and extends 2 m into one room (e.g. a Promat beam above
+     * the door) is architecturally on that side, not straddling. The bbox
+     * would touch the plane at its attachment face, which previously forced
+     * "straddles" and showed the element on both elevations. Keep the
+     * straddle band tight so only geometry that genuinely lives inside the
+     * wall (aggregate parts / door frame) falls through as 0.
      */
     const classifyBbox = (bbox: THREE.Box3 | null | undefined): number | null => {
         if (!bbox) return null
@@ -4629,8 +5258,9 @@ function filterContextForElevationOcclusion(
             if (s > sideMax) sideMax = s
         }
         if (!Number.isFinite(sideMin)) return null
-        if (sideMax < -tol) return -1
-        if (sideMin > +tol) return +1
+        const center = (sideMin + sideMax) / 2
+        if (center > +tol) return +1
+        if (center < -tol) return -1
         return 0
     }
 
@@ -4689,13 +5319,85 @@ function filterContextForElevationOcclusion(
     })
     const allowedPartIds = new Set(filteredLinks.map((l) => l.part.expressID))
 
+    // Walls need band-intersection classification instead of center-based:
+    // a perpendicular cut-wall at the door jamb has its bbox CENTRE deep into
+    // one room but its bbox STRADDLES the host wall plane (min near -tol, max
+    // far on one side). Dropping by center hides the cut face from the view
+    // "behind" it. By testing whether the bbox touches the straddle band, we
+    // keep genuine cut walls on both views while still dropping parallel
+    // walls that live fully behind/in front of the host wall plane (the
+    // 00u5qp… tan-rect case).
+    // Band-intersection drop: a cut wall/door at the door jamb has its bbox
+    // CENTRE deep into one room but its bbox STRADDLES the host wall plane
+    // (min near -tol, max far on one side). Dropping by centre hides the cut
+    // face from the view "behind" it. Testing whether the bbox touches the
+    // straddle band keeps genuine cut elements on both views while still
+    // dropping parallel elements that live fully behind/in front of the host
+    // wall plane.
+    const isElementOccluded = (bbox: THREE.Box3 | null | undefined): boolean => {
+        if (!bbox) return false
+        let sideMin = Infinity
+        let sideMax = -Infinity
+        for (const corner of box3Corners(bbox)) {
+            const s = corner.dot(normal) - planeD
+            if (s < sideMin) sideMin = s
+            if (s > sideMax) sideMax = s
+        }
+        if (!Number.isFinite(sideMin)) return false
+        // Strict straddle: the bbox must span CLEARLY past both sides of the
+        // band, not merely touch one edge. The previous loose check (any
+        // overlap with the band) kept doors fully in the back room whose
+        // near-face barely poked into the band — they appeared as adjacent
+        // doors in elevation even though they're "behind" the cut plane.
+        const trulyStraddles = sideMin < -tol && sideMax > +tol
+        if (trulyStraddles) return false
+        const center = (sideMin + sideMax) / 2
+        const side = center > +tol ? +1 : center < -tol ? -1 : 0
+        return side === sideToDrop
+    }
+    const filteredWalls = context.nearbyWalls.filter((w) => !isElementOccluded(w.boundingBox ?? null))
+    // Adjacent doors need band-intersection too: a cut-door embedded in the
+    // host wall has a thin glazing sub-mesh entirely on one side of the
+    // plane. With centre-based per-mesh filtering the glazing gets dropped
+    // from the opposite view and the door reads as solid wall-colour on one
+    // side and glass-colour on the other (0OLNP8lGUkIgzNri… case).
+    // BUT: an "adjacent door" must actually be NEAR the host wall plane.
+    // Doors deep in the room (e.g. 0TwHxk1LH at depth 1.6 m off plane)
+    // pass the half-space test (camera side) but architecturally belong to
+    // a different wall — projecting their meshes from inside the room
+    // creates a "ghost" door overlay (3wtKbl_FJ case). Require the bbox
+    // centre to be within ~door-thickness of the host plane.
+    const NEARBY_DOOR_DEPTH_TOLERANCE = Math.max(context.viewFrame.thickness, 0.08) + 0.10
+    const isFarFromWallPlane = (bbox: THREE.Box3 | null | undefined): boolean => {
+        if (!bbox) return false
+        let mn = Infinity, mx = -Infinity
+        for (const corner of box3Corners(bbox)) {
+            const s = corner.dot(normal) - planeD
+            if (s < mn) mn = s
+            if (s > mx) mx = s
+        }
+        if (!Number.isFinite(mn)) return false
+        const center = (mn + mx) / 2
+        return Math.abs(center) > NEARBY_DOOR_DEPTH_TOLERANCE
+    }
+    const filteredNearbyDoors = context.nearbyDoors.filter((d) => {
+        if (isElementOccluded(d.boundingBox ?? null)) return false
+        if (isFarFromWallPlane(d.boundingBox ?? null)) return false
+        return true
+    })
+    // Devices straddling the host wall plane (mounted in/at the door jamb)
+    // belong on both views — surface socket on one side, J-box flush in the
+    // wall, etc. Centre-based filter drops them from one view; band-
+    // intersection keeps them on both ('fehlende elektro-elemente' fix).
+    const filteredNearbyDevices = context.nearbyDevices.filter((d) => !isElementOccluded(d.boundingBox ?? null))
+
     const filteredContext: DoorContext = {
         ...context,
-        nearbyDoors: filterElements(context.nearbyDoors, 'nearbyDoor'),
+        nearbyDoors: filteredNearbyDoors,
         nearbyWindows: context.nearbyWindows ? filterElements(context.nearbyWindows, 'nearbyWindow') : context.nearbyWindows,
-        nearbyWalls: filterElements(context.nearbyWalls, 'nearbyWall'),
+        nearbyWalls: filteredWalls,
         nearbyStairs: filterElements(context.nearbyStairs, 'nearbyStair'),
-        nearbyDevices: filterElements(context.nearbyDevices, 'nearbyDevice'),
+        nearbyDevices: filteredNearbyDevices,
         wallAggregatePartLinks: filteredLinks,
     }
 
@@ -4704,8 +5406,27 @@ function filterContextForElevationOcclusion(
             meshes.filter((m) => !isOccludedMesh(m))
         filteredContext.detailedGeometry = {
             ...context.detailedGeometry,
-            nearbyWallMeshes: filterMeshes(context.detailedGeometry.nearbyWallMeshes),
-            nearbyDoorMeshes: filterMeshes(context.detailedGeometry.nearbyDoorMeshes),
+            // Drop nearby-wall meshes whose parent wall was filtered out by
+            // the band-intersection test above, so we don't render phantom
+            // parallel walls living behind/in front of the host wall plane.
+            nearbyWallMeshes: (() => {
+                const keptIds = new Set(filteredWalls.map((w) => w.expressID))
+                return context.detailedGeometry.nearbyWallMeshes.filter((m) => {
+                    const id = m.userData?.expressID
+                    return typeof id === 'number' && keptIds.has(id)
+                })
+            })(),
+            // Keep ALL sub-meshes of kept adjacent doors — a thin glazing
+            // panel's own bbox can classify as -1/+1 even when the parent
+            // door straddles, and dropping it leaves the door with no glass
+            // colour on one of the two views.
+            nearbyDoorMeshes: (() => {
+                const keptIds = new Set(filteredNearbyDoors.map((d) => d.expressID))
+                return context.detailedGeometry.nearbyDoorMeshes.filter((m) => {
+                    const id = m.userData?.expressID
+                    return typeof id === 'number' && keptIds.has(id)
+                })
+            })(),
             nearbyWindowMeshes: filterMeshes(context.detailedGeometry.nearbyWindowMeshes),
             stairMeshes: filterMeshes(context.detailedGeometry.stairMeshes),
             deviceMeshes: filterMeshes(context.detailedGeometry.deviceMeshes),
@@ -4740,19 +5461,20 @@ function renderElevationFromMeshes(
 
     const frame = context.viewFrame
     const margin = Math.max(opts.margin, 0.25)
-    // Size the camera frustum so the 10 cm structural-slab strips above and
-    // below the door are in view. Without this, a slab face that sits
-    // further than `margin` from the door gets clipped by the ortho frustum
-    // and the expected 10 cm strip renders as nothing (the fit scaling then
-    // zooms out, but the slab geometry itself is already gone).
-    const structAboveDy = getStructuralSlabFaceDy(context, 'above')
-    const structBelowDy = getStructuralSlabFaceDy(context, 'below')
-    const topExtFromSlab = structAboveDy != null
-        ? Math.max(structAboveDy + STRUCTURAL_SLAB_INTRUSION_METERS - frame.height / 2, 0)
-        : 0
-    const botExtFromSlab = structBelowDy != null
-        ? Math.max(-structBelowDy + STRUCTURAL_SLAB_INTRUSION_METERS - frame.height / 2, 0)
-        : 0
+    // Camera frustum must enclose the same content window as the clip bounds:
+    // 10 cm into the structural slab below (top face minus 10 cm) and 10 cm
+    // into the structural slab above (underside plus 10 cm), capped at 3.5 m.
+    const structAboveDyForCamera = getStructuralSlabFaceDy(context, 'above')
+    const structBelowDyForCamera = getStructuralSlabFaceDy(context, 'below')
+    const bottomDyForCamera = structBelowDyForCamera != null
+        ? structBelowDyForCamera - STRUCTURAL_SLAB_INTRUSION_METERS
+        : -frame.height / 2 - STRUCTURAL_SLAB_INTRUSION_METERS
+    const topCapDyForCamera = bottomDyForCamera + 3.5
+    const topDyForCamera = structAboveDyForCamera != null
+        ? Math.min(structAboveDyForCamera + STRUCTURAL_SLAB_INTRUSION_METERS, topCapDyForCamera)
+        : topCapDyForCamera
+    const topExtFromSlab = Math.max(topDyForCamera - frame.height / 2, 0)
+    const botExtFromSlab = Math.max(-bottomDyForCamera - frame.height / 2, 0)
     const { camera, frustumWidth, frustumHeight } = createElevationOrthographicCamera(
         frame,
         margin,
@@ -4780,7 +5502,8 @@ function renderElevationFromMeshes(
         context,
         camera,
         frustumWidth,
-        frustumHeight
+        frustumHeight,
+        opts
     )
     const nearbyWindowGeometry = createSemanticElevationNearbyWindowGeometry(
         context,
@@ -4837,6 +5560,9 @@ function renderElevationFromMeshes(
     }
 
     if (context.hostWall || context.wall) {
+        const hostWallCfcForBackdrop = context.hostWall
+            ? context.wallBKP?.get(context.hostWall.expressID) ?? null
+            : null
         const backdropWallGeometry = tagEdges(createProjectedElevationWallBackdropGeometry(
             frame,
             camera,
@@ -4844,8 +5570,8 @@ function renderElevationFromMeshes(
             frustumHeight,
             elevationHostClipBounds,
             opts,
-            getHostWallMeshes(context),
-            getElevationWallFootprintLocalA(context)
+            getElevationWallFootprintLocalA(context),
+            resolveWallElevationColor(hostWallCfcForBackdrop)
         ), '#a855f7') // purple = host wall backdrop
         renderGeometry.edges.push(...backdropWallGeometry.edges)
         renderGeometry.polygons.push(...backdropWallGeometry.polygons)
@@ -4854,8 +5580,9 @@ function renderElevationFromMeshes(
     // `extractEdges`' 30° sharp-edge filter, which drops the coplanar seams
     // web-ifc's door-opening boolean cut produces at the jamb x-coordinates.
     // Keeping silhouette edges is what makes a T-junction perpendicular wall
-    // visible in elevation (its end-face rectangle).
-    const wallMeshes = getHostWallMeshes(context)
+    // visible in elevation (its end-face rectangle). Includes coplanar
+    // nearby walls so storefront layouts render as one continuous wall.
+    const wallMeshes = getHostAndCoplanarWallMeshes(context)
     const wallProjected = wallMeshes.length > 0
         ? clipProjectedGeometryToBounds(
             collectProjectedGeometry(
@@ -4874,29 +5601,65 @@ function renderElevationFromMeshes(
             elevationHostClipBounds
         )
         : { edges: [] as ProjectedEdge[], polygons: [] as ProjectedPolygon[] }
-    // Force host-wall fills to full opacity — elevation shows solid geometry,
-    // not a translucent ghosting of the mesh.
-    const wallGeometry = tagEdges(
-        {
-            edges: wallProjected.edges,
-            polygons: wallProjected.polygons.map((p) => ({ ...p, fillOpacity: 1 })),
-        },
-        '#ef4444'
-    )
-    // Semantic wall geometry (synthetic opening outlines / lintel lines) removed —
-    // user wants only real 3D mesh silhouettes in elevation, no artificial lines.
-    renderGeometry.edges.push(...wallGeometry.edges)
-    renderGeometry.polygons.push(...wallGeometry.polygons)
+    // Compute foreground geometries first so we can occlude wall mesh edges
+    // by them. The user's mental model: cut at the door plane, show what's
+    // at the cut + within view depth, hide things further behind. So lines
+    // from the host wall that fall inside the projected footprint of a
+    // foreground polygon (slab/ceiling/perpendicular wall) are hidden — the
+    // foreground element "covers" the wall there. Devices/safety symbols are
+    // pushed AFTER (and remain on top) since they're the only background
+    // elements the user explicitly wants visible through walls.
     const clippedNearbyWallGeometry = tagEdges(clipProjectedGeometryToBounds(
         nearbyWallGeometry,
         elevationHostClipBounds
     ), '#3b82f6') // blue = nearby walls
+    const slabGeometryClipped = clipProjectedGeometryToBounds(slabGeometryRaw, elevationHostClipBounds)
+    const ceilingGeometryClipped = clipProjectedGeometryToBounds(ceilingGeometryRaw, elevationHostClipBounds)
+    const wallEdgeOccluders: ProjectedPolygon[] = [
+        ...slabGeometryClipped.polygons,
+        ...ceilingGeometryClipped.polygons,
+        ...clippedNearbyWallGeometry.polygons,
+        // Door + storefront polygons occlude wall mesh edges within the door
+        // opening. Without this, boolean-cut seams from the IFC's door hole
+        // (mesh edge at door head, jamb returns) project as horizontal /
+        // vertical "ghost lines" over the door area (03X27dQWY storefront
+        // case — horizontal red line spanning the canvas at door-head height).
+        ...renderGeometry.polygons,
+    ]
+    // Force host-wall fills to full opacity — elevation shows solid geometry,
+    // not a translucent ghosting of the mesh.
+    const wallGeometry = tagEdges(
+        {
+            edges: occludeEdgesByPolygons(wallProjected.edges, wallEdgeOccluders),
+            polygons: wallProjected.polygons.map((p) => ({ ...p, fillOpacity: 1 })),
+        },
+        '#ef4444'
+    )
+    // Ceiling-only occlusion: ceiling edges that pass BEHIND the host wall
+    // (or the nearby perpendicular wall meshes) must not "ghost" through the
+    // wall fill (1mRZBdiTM, 03X27dQWY case — pink horizontal ceiling lines
+    // showing across the wall above the door head). SLAB edges are NOT
+    // occluded — the slab top line at floor level is the architectural floor
+    // reference and must stay visible as a continuous horizontal across the
+    // entire view, even where the wall fill is in front of it (Unterlagsboden
+    // visibility requirement).
+    const ceilingEdgeOccluders: ProjectedPolygon[] = [
+        ...wallProjected.polygons,
+        ...clippedNearbyWallGeometry.polygons,
+    ]
+    const slabGeometry = tagEdges(slabGeometryClipped, '#eab308') // yellow = slab
+    const ceilingGeometry = tagEdges({
+        edges: occludeEdgesByPolygons(ceilingGeometryClipped.edges, ceilingEdgeOccluders),
+        polygons: ceilingGeometryClipped.polygons,
+    }, '#ec4899') // pink = ceiling
+    // Semantic wall geometry (synthetic opening outlines / lintel lines) removed —
+    // user wants only real 3D mesh silhouettes in elevation, no artificial lines.
+    renderGeometry.edges.push(...wallGeometry.edges)
+    renderGeometry.polygons.push(...wallGeometry.polygons)
     renderGeometry.edges.push(...clippedNearbyWallGeometry.edges)
     renderGeometry.polygons.push(...clippedNearbyWallGeometry.polygons)
-    const slabGeometry = tagEdges(clipProjectedGeometryToBounds(slabGeometryRaw, elevationHostClipBounds), '#eab308') // yellow = slab
     renderGeometry.edges.push(...slabGeometry.edges)
     renderGeometry.polygons.push(...slabGeometry.polygons)
-    const ceilingGeometry = tagEdges(clipProjectedGeometryToBounds(ceilingGeometryRaw, elevationHostClipBounds), '#ec4899') // pink = ceiling
     renderGeometry.edges.push(...ceilingGeometry.edges)
     renderGeometry.polygons.push(...ceilingGeometry.polygons)
     const stairGeometry = tagEdges(clipProjectedGeometryToBounds(stairGeometryRaw, elevationHostClipBounds), '#6366f1') // indigo = stair
@@ -4928,6 +5691,9 @@ function renderElevationFromMeshes(
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
 
+    const doorAnchorProjected = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
+    const doorAnchor = { x: doorAnchorProjected.x, y: doorAnchorProjected.y }
+
     return generateSVGString(
         renderGeometry.edges,
         renderGeometry.polygons,
@@ -4941,6 +5707,7 @@ function renderElevationFromMeshes(
             suppressSyntheticWallBands: true,
             storeyMarkerProjectedY: projectStoreyMarkerLevelY(context, camera, frustumWidth, frustumHeight),
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
+            doorAnchor,
         }
     )
 }
@@ -4958,22 +5725,25 @@ function renderFallbackContextWindowSvg(
         stroke="${CONTEXT_DOOR_LINE_COLOR}" stroke-width="${lineWidth * CONTEXT_DOOR_EDGE_STROKE_FACTOR}"/>`
 }
 
+/**
+ * Last-resort SVG for a nearby door in the bounding-box-only fallback path.
+ * Used only when no mesh geometry was loaded for the door. BKP-coloured fill;
+ * no fake inset frame (that was synthetic proxy geometry — we show the real
+ * silhouette everywhere we have one).
+ */
 function renderFallbackContextDoorSvg(
     x: number,
     y: number,
     width: number,
     height: number,
-    lineWidth: number
+    lineWidth: number,
+    fillColor: string = CONTEXT_DOOR_FILL_COLOR,
+    strokeColor: string = CONTEXT_DOOR_LINE_COLOR
 ): string {
-    const insetX = Math.min(width * 0.08, 14)
-    const insetY = Math.min(height * 0.05, 14)
     return `
   <rect x="${x}" y="${y}" width="${width}" height="${height}"
-        fill="${CONTEXT_DOOR_FILL_COLOR}" fill-opacity="${CONTEXT_DOOR_FILL_OPACITY}"
-        stroke="${CONTEXT_DOOR_LINE_COLOR}" stroke-width="${lineWidth * CONTEXT_DOOR_EDGE_STROKE_FACTOR}"/>
-  <rect x="${x + insetX}" y="${y + insetY}"
-        width="${Math.max(0, width - insetX * 2)}" height="${Math.max(0, height - insetY * 2)}"
-        fill="none" stroke="${CONTEXT_DOOR_LINE_COLOR}" stroke-width="${Math.max(0.8, lineWidth * CONTEXT_DOOR_EDGE_STROKE_FACTOR)}"/>`
+        fill="${fillColor}" fill-opacity="1"
+        stroke="${strokeColor}" stroke-width="${lineWidth * DOOR_EDGE_STROKE_FACTOR}"/>`
 }
 
 /**
@@ -5026,12 +5796,15 @@ function renderElevationFromBoundingBox(
             if (rectX + rectWidth < padding || rectX > svgWidth - padding || rectY + rectHeight < padding || rectY > padding + availableHeight) {
                 return ''
             }
+            const bkpFill = resolveElevationDoorColor(context.nearbyDoorBKP.get(rect.expressID ?? -1))
             return renderFallbackContextDoorSvg(
                 rectX,
                 rectY,
                 rectWidth,
                 rectHeight,
-                lineWidth
+                lineWidth,
+                bkpFill,
+                lineColor
             )
         })
         .filter(Boolean)
@@ -5119,7 +5892,11 @@ export async function renderDoorPlanSVG(
     /** When rendering with `renderDoorViews`, pass front elevation scale so plan matches Vorderansicht. */
     sharedScaleFromFront?: number
 ): Promise<string> {
-    const opts: Required<SVGRenderOptions> = { ...normalizeRenderOptions(options), height: planSvgCanvasHeight(options.width || 1000) }
+    const merged = normalizeRenderOptions(options)
+    const opts: Required<SVGRenderOptions> = {
+        ...merged,
+        height: planSvgCanvasHeight(merged.width),
+    }
     const { width: doorWidth, thickness: doorThickness, height: doorHeight } = context.viewFrame
     // #region agent log
     fetch(DEBUG_INGEST_ENDPOINT, {
@@ -5826,13 +6603,7 @@ function renderPlanFromMeshes(
         polygons: [],
     }
 
-    const planViewportClip = getViewportClipBounds(
-        fitGeometry,
-        opts,
-        context,
-        sharedDrawingScale,
-        'Plan'
-    )
+    const planViewportClip = getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
 
     const renderGeometry = collectProjectedGeometry(
         doorMeshes,
@@ -5848,17 +6619,14 @@ function renderPlanFromMeshes(
         DOOR_EDGE_STROKE_FACTOR
     )
     const deviceGeometry = createSemanticPlanDeviceGeometry(context, camera, frustumWidth, frustumHeight, cutHeight, opts)
-    const nearbyOpeningsRaw = createPlanNearbyOpeningsGeometry(
-        context,
-        camera,
-        frustumWidth,
-        frustumHeight,
-        cutHeight,
-        opts
-    )
-    const nearbyOpeningsGeometry = planViewportClip
-        ? clipProjectedGeometryToBounds(nearbyOpeningsRaw, planViewportClip)
-        : nearbyOpeningsRaw
+    const nearbyDoorGeometryRaw = createSemanticPlanNearbyDoorGeometry(context, camera, frustumWidth, frustumHeight, cutHeight)
+    const nearbyWindowGeometryRaw = createSemanticPlanNearbyWindowGeometry(context, camera, frustumWidth, frustumHeight, cutHeight)
+    const nearbyDoorGeometry = planViewportClip
+        ? clipProjectedGeometryToBounds(nearbyDoorGeometryRaw, planViewportClip)
+        : nearbyDoorGeometryRaw
+    const nearbyWindowGeometry = planViewportClip
+        ? clipProjectedGeometryToBounds(nearbyWindowGeometryRaw, planViewportClip)
+        : nearbyWindowGeometryRaw
     renderGeometry.edges.push(...deviceGeometry.edges)
     renderGeometry.polygons.push(...deviceGeometry.polygons)
     renderGeometry.edges.push(...nearbyOpeningsGeometry.edges)
@@ -5901,18 +6669,15 @@ function renderPlanFromMeshes(
     const hostGeometry = (planWallGeometry.edges.length > 0 || planWallGeometry.polygons.length > 0)
         ? clipProjectedGeometryToBounds(
             planWallGeometry,
-            getViewportClipBounds(
-                fitGeometry,
-                opts,
-                context,
-                sharedDrawingScale,
-                'Plan'
-            )
+            getViewportClipBounds(fitGeometry, opts, context, sharedDrawingScale, 'Plan')
         )
         : { edges: [], polygons: [] }
     renderGeometry.edges.push(...hostGeometry.edges)
     renderGeometry.polygons.push(...hostGeometry.polygons)
     const hasPlanWallGeometry = hostGeometry.edges.length > 0 || hostGeometry.polygons.length > 0
+
+    const doorAnchorProjected = projectPoint(frame.origin, camera, frustumWidth, frustumHeight)
+    const doorAnchor = { x: doorAnchorProjected.x, y: doorAnchorProjected.y }
 
     return generateSVGString(
         renderGeometry.edges,
@@ -5927,6 +6692,7 @@ function renderPlanFromMeshes(
             planDoorBounds,
             planWallBandBounds: { minY: planWallBandBounds.minY, maxY: planWallBandBounds.maxY },
             ...(sharedDrawingScale !== undefined ? { sharedDrawingScale } : {}),
+            doorAnchor,
         }
     )
 }

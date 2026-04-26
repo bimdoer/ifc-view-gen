@@ -6,6 +6,7 @@ import {
     extractDoorAnalyzerSidecarMaps,
     extractDoorHostRelationships,
     extractDoorLeafMetadata,
+    extractElectricalLayerAssignments,
     extractElementStoreyElevationMap,
     extractElementStoreyMap,
     extractSlabAggregateParts,
@@ -15,17 +16,16 @@ import { renderDoorViews, type SVGRenderOptions } from './svg-renderer'
 
 export type DoorView = 'front' | 'back' | 'plan'
 
+// Colour defaults come from `config/render-colors.json` (see DEFAULT_OPTIONS in
+// svg-renderer.ts). Do NOT hardcode colour fields here — they would override
+// the palette and silently undo Phases 1–5 of the colour-config rollout.
 export const DEFAULT_ROUND_RENDER_OPTIONS: SVGRenderOptions = {
     width: 1000,
     height: 1000,
     margin: 0.5,
-    doorColor: '#dedede',
-    wallColor: '#e3e3e3',
-    deviceColor: '#fcc647',
-    lineColor: '#000000',
     lineWidth: 1.5,
-    showLegend: true,
-    showLabels: true,
+    showLegend: false,
+    showLabels: false,
     wallRevealSide: 0.12,
     wallRevealTop: 0.04,
 }
@@ -78,22 +78,28 @@ export async function renderDoorsFromIfc(
     // Load the electrical IFC as a secondary model so analyzeDoors can harvest
     // nearby-device candidates from it (the AR IFC never contributes devices).
     const secondaryModel = elecFile ? await loadIFCModelWithMetadata(elecFile) : undefined
-    const { operationTypeMap, csetStandardCHMap, wallAggregatePartMap } =
+    const { operationTypeMap, csetStandardCHMap, wallCsetStandardCHMap, wallAggregatePartMap } =
         await extractDoorAnalyzerSidecarMaps(archFile)
     const doorLeafMetadataMap = await extractDoorLeafMetadata(archFile)
     const hostRelationshipMap = await extractDoorHostRelationships(archFile)
     const slabAggregatePartMap = await extractSlabAggregateParts(archFile)
+    const deviceLayerMap = elecFile ? await extractElectricalLayerAssignments(elecFile) : new Map<number, string[]>()
 
-    // Merge storey elevations from arch + elec so the nearby-device storey
-    // filter can match a door's storey to the elec element's storey.
+    // Storey elevations from arch + elec. Arch entries take precedence —
+    // expressIDs are file-local, so the same numeric ID in elec refers to a
+    // completely unrelated element. The previous merge overwrote door
+    // (arch) elevations with elec elevations whenever IDs collided, which
+    // surfaced as the storey ▼ marker pointing at the WRONG storey for
+    // some doors (0TwHxk1LH… case: 01OG door with storey-elevation 17.8 m
+    // pulled from an elec element).
     const storeyElevationMap = new Map<number, number>()
-    for (const [id, elev] of await extractElementStoreyElevationMap(archFile)) {
-        storeyElevationMap.set(id, elev)
-    }
     if (elecFile) {
         for (const [id, elev] of await extractElementStoreyElevationMap(elecFile)) {
             storeyElevationMap.set(id, elev)
         }
+    }
+    for (const [id, elev] of await extractElementStoreyElevationMap(archFile)) {
+        storeyElevationMap.set(id, elev)
     }
 
     const contexts = await analyzeDoors(
@@ -106,7 +112,9 @@ export async function renderDoorsFromIfc(
         hostRelationshipMap,
         slabAggregatePartMap,
         wallAggregatePartMap,
-        storeyElevationMap
+        storeyElevationMap,
+        wallCsetStandardCHMap,
+        deviceLayerMap
     )
 
     // The browser pipeline fills storeyName from the Fragments spatial tree;
