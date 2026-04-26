@@ -42,6 +42,8 @@ next-env.d.ts
 guid.json
 *.webp
 *.xlsx
+*.bcf
+*.bcfzip
 
 # airtable render round
 /test-output/
