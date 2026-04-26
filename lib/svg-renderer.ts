@@ -2175,16 +2175,46 @@ function createSemanticElevationNearbyWallGeometry(
     // edges); skipping them here avoids duplicate "schematic rect" overlays.
     const coplanarHostWallIDs = getCoplanarHostWallExpressIDs(context)
 
+    // Collect strips per (label, meshes, fallbackBoundingBox). The label is
+    // used only for BKP fill resolution; "meshes" / "fallbackBoundingBox"
+    // drive the actual extent measurement.
+    interface Strip { label: 'wall' | 'part'; expressID: number; meshes: THREE.Mesh[]; fallbackBox?: THREE.Box3 | null; bkpKey: number }
+    const strips: Strip[] = []
     for (const wall of context.nearbyWalls) {
         if (coplanarHostWallIDs.has(wall.expressID)) continue
-        // Prefer true cross-section from mesh vertices within the door's
-        // depth band — matches what's actually visible at the cut plane.
-        // Falls back to the element bbox if no mesh is available.
         const meshesForWall = nearbyWallMeshesAll.filter((m) => m.userData?.expressID === wall.expressID)
+        strips.push({
+            label: 'wall',
+            expressID: wall.expressID,
+            meshes: meshesForWall,
+            fallbackBox: wall.boundingBox ?? null,
+            bkpKey: wall.expressID,
+        })
+        // Aggregate parts of the nearby wall: render each part as its own
+        // strip. Modellers sometimes attach perpendicular wall stubs on the
+        // OPPOSITE side of the door under the same parent IfcWall — the
+        // parent's bbox doesn't span those parts, so a single strip per
+        // wall misses them entirely (03X27dQWY: wall 52745 at door's right
+        // has parts at door's left forming the left stirnseite).
+        for (const link of context.wallAggregatePartLinks ?? []) {
+            if (link.parentWallExpressID !== wall.expressID) continue
+            const partMeshes = nearbyWallMeshesAll.filter((m) => m.userData?.expressID === link.part.expressID)
+            if (partMeshes.length === 0 && !link.part.boundingBox) continue
+            strips.push({
+                label: 'part',
+                expressID: link.part.expressID,
+                meshes: partMeshes,
+                fallbackBox: link.part.boundingBox ?? null,
+                bkpKey: wall.expressID,
+            })
+        }
+    }
+
+    for (const strip of strips) {
         let bounds: AxisBounds | null = null
-        if (meshesForWall.length > 0) {
+        if (strip.meshes.length > 0) {
             bounds = measureMeshesInAxesDepthBand(
-                meshesForWall,
+                strip.meshes,
                 frame.widthAxis,
                 frame.upAxis,
                 frame.semanticFacing,
@@ -2192,9 +2222,9 @@ function createSemanticElevationNearbyWallGeometry(
                 depthHalfWidth
             )
         }
-        if (!bounds && wall.boundingBox) {
+        if (!bounds && strip.fallbackBox) {
             bounds = measureBoundingBoxInAxes(
-                wall.boundingBox,
+                strip.fallbackBox,
                 frame.widthAxis,
                 frame.upAxis,
                 frame.semanticFacing
@@ -2220,12 +2250,8 @@ function createSemanticElevationNearbyWallGeometry(
         }
         if (rect.maxA <= rect.minA || rect.maxB <= rect.minB) continue
         const corners = createRectPoints3D(frame.origin, frame.widthAxis, frame.upAxis, rect.minA, rect.maxA, rect.minB, rect.maxB)
-        const wallCfc = context.wallBKP?.get(wall.expressID) ?? null
+        const wallCfc = context.wallBKP?.get(strip.bkpKey) ?? null
         const wallFill = resolveWallElevationColor(wallCfc) ?? options.wallColor
-        // Walls are opaque in reality. With fillOpacity < 1 a nearby wall
-        // whose Y extent reaches above the backdrop's Y clamp let the page
-        // background bleed through, producing a lighter-coloured "white
-        // square" artefact above the door.
         appendProjectedFillPolygon(geometry, corners, camera, width, height, wallFill, -0.8, 1)
         for (let i = 0; i < corners.length; i++) {
             appendProjectedEdge(geometry, corners[i], corners[(i + 1) % corners.length], camera, width, height, options.lineColor, -0.8, WALL_EDGE_STROKE_FACTOR)
@@ -3073,14 +3099,116 @@ function createSemanticElevationDeviceGeometry(
     const hasWallContext = Boolean(context.hostWall || context.wall)
     const hostWallCfcForDevices = context.hostWall ? context.wallBKP?.get(context.hostWall.expressID) ?? null : null
     const hostWallElevColorForDevices = resolveWallElevationColor(hostWallCfcForDevices) ?? options.wallColor
+    const allDeviceMeshes = context.detailedGeometry?.deviceMeshes ?? []
 
     for (const device of context.nearbyDevices) {
         if (!shouldRenderDeviceInElevation(context, device.expressID, isBackView)) {
             continue
         }
+        const deviceFill = isSafetyDevice(device.name, context.deviceLayers?.get(device.expressID) ?? null) ? options.safetyColor : options.deviceColor
+
+        // Real mesh path: project the IFC geometry as-is. Honest size from the
+        // model — Gegensprechanlage panel renders as ~20×25cm because that's
+        // the bbox in the elec IFC, intercom-mounted-on-jamb shows the actual
+        // panel footprint, not a thinned re-projection of the world bbox.
+        const deviceMeshes = allDeviceMeshes.filter((m) => m.userData?.expressID === device.expressID)
+        const hasMesh = deviceMeshes.length > 0 && deviceMeshes.some(
+            (m) => (m.geometry?.attributes?.position?.count ?? 0) > 0
+        )
+
+        if (hasMesh) {
+            // 1) Project the mesh
+            const projected = collectProjectedGeometry(
+                deviceMeshes,
+                context,
+                options,
+                camera,
+                width,
+                height,
+                false,
+                1,
+                'camera-facing',
+                false,
+                DEVICE_EDGE_STROKE_FACTOR
+            )
+            // 2) Compute the projected 2D bbox in screen coords for the wall-color
+            // backdrop. Backdrop is a flat rect occluding the host-wall fill so the
+            // device edges read clearly.
+            if (hasWallContext && projected.polygons.length > 0) {
+                let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+                let depthSum = 0, depthCount = 0
+                for (const poly of projected.polygons) {
+                    for (const pt of poly.points) {
+                        if (pt.x < minX) minX = pt.x
+                        if (pt.x > maxX) maxX = pt.x
+                        if (pt.y < minY) minY = pt.y
+                        if (pt.y > maxY) maxY = pt.y
+                    }
+                    depthSum += poly.depth
+                    depthCount++
+                }
+                if (depthCount > 0 && maxX - minX > 0.5 && maxY - minY > 0.5) {
+                    geometry.polygons.push({
+                        points: [
+                            { x: minX, y: minY },
+                            { x: maxX, y: minY },
+                            { x: maxX, y: maxY },
+                            { x: minX, y: maxY },
+                        ],
+                        color: hostWallElevColorForDevices,
+                        depth: depthSum / depthCount + 0.001,
+                        layer: -1,
+                        skipClip: true,
+                        fillOpacity: 1,
+                    })
+                }
+            }
+            // 3) Override device polygon fill, mark skipClip so wall-clip
+            // bounds don't crop devices on the corridor edge.
+            for (const poly of projected.polygons) {
+                poly.color = deviceFill
+                poly.fillOpacity = 1
+                poly.skipClip = true
+            }
+            geometry.polygons.push(...projected.polygons)
+
+            // Silhouette outline: 2D convex hull of all projected vertices.
+            // This gives the device's outer outline without showing internal
+            // mesh seams (button details, recessed features). Plan keeps the
+            // full mesh edges (the cut requires the inner line work).
+            const allPoints: { x: number; y: number }[] = []
+            for (const poly of projected.polygons) {
+                for (const pt of poly.points) allPoints.push(pt)
+            }
+            const hull = convexHull2D(allPoints)
+            if (hull.length >= 2) {
+                let depthSum = 0, depthCount = 0, layerVal = 1
+                for (const poly of projected.polygons) {
+                    depthSum += poly.depth
+                    depthCount++
+                    layerVal = poly.layer ?? layerVal
+                }
+                const depth = depthCount > 0 ? depthSum / depthCount - 0.001 : -1
+                for (let i = 0; i < hull.length; i++) {
+                    const a = hull[i]
+                    const b = hull[(i + 1) % hull.length]
+                    geometry.edges.push({
+                        x1: a.x, y1: a.y, x2: b.x, y2: b.y,
+                        color: options.lineColor,
+                        depth,
+                        layer: layerVal,
+                        skipClip: true,
+                        strokeWidthFactor: DEVICE_EDGE_STROKE_FACTOR,
+                    })
+                }
+            }
+            continue
+        }
+
+        // Fallback: no mesh available — synthesize a rect from the bbox so the
+        // device still shows up. Same logic as before v12.
         const deviceBox = device.boundingBox
         if (!deviceBox) continue
-
         const bounds = measureBoundingBoxInAxes(deviceBox, frame.widthAxis, frame.upAxis, frame.semanticFacing)
         const rectWidth = Math.max(bounds.maxA - bounds.minA, 0.05)
         const rectHeight = Math.max(bounds.maxB - bounds.minB, 0.05)
@@ -3121,7 +3249,6 @@ function createSemanticElevationDeviceGeometry(
             -rectHeight / 2,
             rectHeight / 2
         )
-        const deviceFill = isSafetyDevice(device.name, context.deviceLayers?.get(device.expressID) ?? null) ? options.safetyColor : options.deviceColor
         appendProjectedPolygon(geometry, rect, camera, width, height, deviceFill, options.lineColor, 1, 1, DEVICE_EDGE_STROKE_FACTOR)
         const lastPolygon = geometry.polygons[geometry.polygons.length - 1]
         if (lastPolygon) {
@@ -3146,14 +3273,51 @@ function createSemanticPlanDeviceGeometry(
     const geometry = { edges: [], polygons: [] } as { edges: ProjectedEdge[]; polygons: ProjectedPolygon[] }
     const frame = context.viewFrame
     const depthCap = Math.max(frame.thickness * 0.9, 0.05)
+    const allDeviceMeshes = context.detailedGeometry?.deviceMeshes ?? []
 
     for (const device of context.nearbyDevices) {
         if (!shouldRenderDeviceInPlan(context, device.expressID)) {
             continue
         }
+        const deviceFill = isSafetyDevice(device.name, context.deviceLayers?.get(device.expressID) ?? null) ? options.safetyColor : options.deviceColor
+
+        // Plan view is a horizontal cut at cutHeight. We honour the real mesh
+        // by projecting the mesh edges/polygons (orthographic top-down camera
+        // already in place). Mesh extent in the up-axis doesn't affect the
+        // horizontal projection, so the cut-height is implicitly satisfied.
+        const deviceMeshes = allDeviceMeshes.filter((m) => m.userData?.expressID === device.expressID)
+        const hasMesh = deviceMeshes.length > 0 && deviceMeshes.some(
+            (m) => (m.geometry?.attributes?.position?.count ?? 0) > 0
+        )
+        if (hasMesh) {
+            const projected = collectProjectedGeometry(
+                deviceMeshes,
+                context,
+                options,
+                camera,
+                width,
+                height,
+                false,
+                0,
+                'camera-facing',
+                false,
+                DEVICE_EDGE_STROKE_FACTOR
+            )
+            for (const poly of projected.polygons) {
+                poly.color = deviceFill
+                poly.fillOpacity = 1
+            }
+            for (const edge of projected.edges) {
+                edge.color = options.lineColor
+            }
+            geometry.polygons.push(...projected.polygons)
+            geometry.edges.push(...projected.edges)
+            continue
+        }
+
+        // Fallback: synthesize a rect from bbox.
         const deviceBox = device.boundingBox
         if (!deviceBox) continue
-
         const bounds = measureBoundingBoxInAxes(deviceBox, frame.widthAxis, frame.semanticFacing, frame.upAxis)
         const rectWidth = Math.max(bounds.maxA - bounds.minA, 0.05)
         const rectDepth = Math.min(Math.max(bounds.maxB - bounds.minB, 0.02), depthCap)
@@ -3172,7 +3336,6 @@ function createSemanticPlanDeviceGeometry(
             -rectDepth / 2,
             rectDepth / 2
         )
-        const deviceFill = isSafetyDevice(device.name, context.deviceLayers?.get(device.expressID) ?? null) ? options.safetyColor : options.deviceColor
         appendProjectedPolygon(geometry, rect, camera, width, height, deviceFill, options.lineColor, 0, 1, DEVICE_EDGE_STROKE_FACTOR)
     }
 
@@ -3234,7 +3397,51 @@ function getBoundsFromProjectedGeometry(
     return { minX, maxX, minY, maxY }
 }
 
+interface EdgeClipResult {
+    edge: ProjectedEdge
+    /** True iff the edge was modified by clipping (one or both endpoints moved
+     * because the edge crossed the bounds). False if the edge was already
+     * fully inside bounds — including the degenerate case of a vertical edge
+     * that natively lives exactly at minX/maxX, which must NOT be confused
+     * with a "closing line" clip artifact. */
+    clippedLaterally: boolean
+}
+
 function clipEdgeToBounds(edge: ProjectedEdge, bounds: ProjectedBounds): ProjectedEdge | null {
+    const result = clipEdgeToBoundsResult(edge, bounds)
+    return result?.edge ?? null
+}
+
+/**
+ * 2D convex hull (Andrew's monotone chain). Returns hull vertices in CCW
+ * order. Used by the elevation device renderer to draw the device silhouette
+ * outline from the projected mesh vertices, hiding internal mesh seams
+ * (buttons, recesses) while keeping the outer outline. Empty / degenerate
+ * inputs return as-is.
+ */
+function convexHull2D(points: { x: number; y: number }[]): { x: number; y: number }[] {
+    if (points.length < 3) return [...points]
+    const sorted = [...points].sort((a, b) => a.x - b.x || a.y - b.y)
+    const cross = (
+        O: { x: number; y: number },
+        A: { x: number; y: number },
+        B: { x: number; y: number }
+    ) => (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x)
+    const lower: { x: number; y: number }[] = []
+    for (const p of sorted) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop()
+        lower.push(p)
+    }
+    const upper: { x: number; y: number }[] = []
+    for (let i = sorted.length - 1; i >= 0; i--) {
+        const p = sorted[i]
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop()
+        upper.push(p)
+    }
+    return [...lower.slice(0, -1), ...upper.slice(0, -1)]
+}
+
+function clipEdgeToBoundsResult(edge: ProjectedEdge, bounds: ProjectedBounds): EdgeClipResult | null {
     let t0 = 0
     let t1 = 1
 
@@ -3258,21 +3465,30 @@ function clipEdgeToBounds(edge: ProjectedEdge, bounds: ProjectedBounds): Project
         return true
     }
 
+    // Track whether each lateral test moved t0/t1 (i.e., the edge crossed the
+    // lateral bound). The vertical (y) tests don't matter for "closing line"
+    // detection — that artifact only appears at minX/maxX.
+    const t0Before = t0
+    const t1Before = t1
+    const lateralOk = clipTest(-dx, edge.x1 - bounds.minX) && clipTest(dx, bounds.maxX - edge.x1)
+    const clippedLaterally = lateralOk && (t0 > t0Before + 1e-9 || t1 < t1Before - 1e-9)
+    if (!lateralOk) return null
     if (
-        !clipTest(-dx, edge.x1 - bounds.minX)
-        || !clipTest(dx, bounds.maxX - edge.x1)
-        || !clipTest(-dy, edge.y1 - bounds.minY)
+        !clipTest(-dy, edge.y1 - bounds.minY)
         || !clipTest(dy, bounds.maxY - edge.y1)
     ) {
         return null
     }
 
     return {
-        ...edge,
-        x1: edge.x1 + t0 * dx,
-        y1: edge.y1 + t0 * dy,
-        x2: edge.x1 + t1 * dx,
-        y2: edge.y1 + t1 * dy,
+        edge: {
+            ...edge,
+            x1: edge.x1 + t0 * dx,
+            y1: edge.y1 + t0 * dy,
+            x2: edge.x1 + t1 * dx,
+            y2: edge.y1 + t1 * dy,
+        },
+        clippedLaterally,
     }
 }
 
@@ -3571,14 +3787,16 @@ function clipProjectedGeometryToBounds(
         }
     }
 
-    // Drop edges that lie EXACTLY on the lateral crop boundary (minX or
-    // maxX). When the corridor cuts content mid-extent, the cut should be
-    // invisible — no black "closing line" along the lateral crop. Edges
-    // are in PROJECTED METRES (output of `projectPoint(... frustumWidth ...)`),
-    // not pixels, so the eps must be a tight metre value: 1 mm matches
-    // floating-point clipping precision without flagging real geometry that
-    // happens to live near the boundary (e.g. a perpendicular wall's near
-    // face ~3 cm inside the corridor).
+    // "Closing line" artifact: when an edge crossed the lateral crop and got
+    // clipped down to a vertical segment lying ON the crop boundary, that
+    // segment is a clip artifact (not real wall geometry) and shouldn't draw
+    // as a vertical line at the corridor edge.
+    //
+    // CRITICAL: a perpendicular-wall edge that natively lives at exactly
+    // minX/maxX (e.g. the back face of a wall whose end aligns with the
+    // corridor) must NOT be dropped — that edge IS real geometry, and dropping
+    // it produces "missing wall" reports. We distinguish artifact from real
+    // geometry by tracking whether clipping moved the edge's endpoints.
     const BOUNDARY_EPS = 0.001
     const isOnLateralBoundary = (e: ProjectedEdge): boolean => {
         if (Math.abs(e.x1 - e.x2) > BOUNDARY_EPS) return false
@@ -3593,10 +3811,15 @@ function clipProjectedGeometryToBounds(
 
     const edges: ProjectedEdge[] = []
     for (const edge of geometry.edges) {
-        const clippedEdge = clipEdgeToBounds(edge, bounds)
-        if (clippedEdge && !isOnLateralBoundary(clippedEdge)) {
-            edges.push({ ...clippedEdge, skipClip: true })
-        }
+        const clipResult = clipEdgeToBoundsResult(edge, bounds)
+        if (!clipResult) continue
+        // Drop only if the edge lies on the lateral boundary AND clipping
+        // moved it there (artifact from cropping content that originally
+        // extended past the crop). Native vertical edges at the boundary
+        // — perpendicular wall back faces, frame returns aligned to the
+        // corridor end — pass through.
+        if (clipResult.clippedLaterally && isOnLateralBoundary(clipResult.edge)) continue
+        edges.push({ ...clipResult.edge, skipClip: true })
     }
 
     const polygons: ProjectedPolygon[] = []
@@ -5347,12 +5570,18 @@ function renderElevationFromMeshes(
         nearbyWallGeometry,
         elevationHostClipBounds
     ), '#3b82f6') // blue = nearby walls
-    const slabGeometry = tagEdges(clipProjectedGeometryToBounds(slabGeometryRaw, elevationHostClipBounds), '#eab308') // yellow = slab
-    const ceilingGeometry = tagEdges(clipProjectedGeometryToBounds(ceilingGeometryRaw, elevationHostClipBounds), '#ec4899') // pink = ceiling
+    const slabGeometryClipped = clipProjectedGeometryToBounds(slabGeometryRaw, elevationHostClipBounds)
+    const ceilingGeometryClipped = clipProjectedGeometryToBounds(ceilingGeometryRaw, elevationHostClipBounds)
     const wallEdgeOccluders: ProjectedPolygon[] = [
-        ...slabGeometry.polygons,
-        ...ceilingGeometry.polygons,
+        ...slabGeometryClipped.polygons,
+        ...ceilingGeometryClipped.polygons,
         ...clippedNearbyWallGeometry.polygons,
+        // Door + storefront polygons occlude wall mesh edges within the door
+        // opening. Without this, boolean-cut seams from the IFC's door hole
+        // (mesh edge at door head, jamb returns) project as horizontal /
+        // vertical "ghost lines" over the door area (03X27dQWY storefront
+        // case — horizontal red line spanning the canvas at door-head height).
+        ...renderGeometry.polygons,
     ]
     // Force host-wall fills to full opacity — elevation shows solid geometry,
     // not a translucent ghosting of the mesh.
@@ -5363,6 +5592,23 @@ function renderElevationFromMeshes(
         },
         '#ef4444'
     )
+    // Ceiling-only occlusion: ceiling edges that pass BEHIND the host wall
+    // (or the nearby perpendicular wall meshes) must not "ghost" through the
+    // wall fill (1mRZBdiTM, 03X27dQWY case — pink horizontal ceiling lines
+    // showing across the wall above the door head). SLAB edges are NOT
+    // occluded — the slab top line at floor level is the architectural floor
+    // reference and must stay visible as a continuous horizontal across the
+    // entire view, even where the wall fill is in front of it (Unterlagsboden
+    // visibility requirement).
+    const ceilingEdgeOccluders: ProjectedPolygon[] = [
+        ...wallProjected.polygons,
+        ...clippedNearbyWallGeometry.polygons,
+    ]
+    const slabGeometry = tagEdges(slabGeometryClipped, '#eab308') // yellow = slab
+    const ceilingGeometry = tagEdges({
+        edges: occludeEdgesByPolygons(ceilingGeometryClipped.edges, ceilingEdgeOccluders),
+        polygons: ceilingGeometryClipped.polygons,
+    }, '#ec4899') // pink = ceiling
     // Semantic wall geometry (synthetic opening outlines / lintel lines) removed —
     // user wants only real 3D mesh silhouettes in elevation, no artificial lines.
     renderGeometry.edges.push(...wallGeometry.edges)

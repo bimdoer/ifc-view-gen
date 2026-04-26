@@ -100,8 +100,25 @@ async function main() {
 
     console.log()
     console.log(`wallAggregatePartLinks count=${ctx.wallAggregatePartLinks?.length ?? 0}`)
-    for (const link of (ctx.wallAggregatePartLinks ?? []).slice(0, 10)) {
-        console.log(`  part eid=${link.part.expressID} parent eid=${link.parentWallExpressID} type=${link.part.typeName}`)
+    for (const link of (ctx.wallAggregatePartLinks ?? [])) {
+        const bb = link.part.boundingBox
+        if (!bb) { console.log(`  part eid=${link.part.expressID} parent=${link.parentWallExpressID} (no bbox) name="${link.part.name ?? ''}"`); continue }
+        const corners = [
+            new THREE.Vector3(bb.min.x, bb.min.y, bb.min.z),
+            new THREE.Vector3(bb.max.x, bb.min.y, bb.min.z),
+            new THREE.Vector3(bb.min.x, bb.max.y, bb.min.z),
+            new THREE.Vector3(bb.max.x, bb.max.y, bb.min.z),
+            new THREE.Vector3(bb.min.x, bb.min.y, bb.max.z),
+            new THREE.Vector3(bb.max.x, bb.min.y, bb.max.z),
+            new THREE.Vector3(bb.min.x, bb.max.y, bb.max.z),
+            new THREE.Vector3(bb.max.x, bb.max.y, bb.max.z),
+        ]
+        let minA=Infinity,maxA=-Infinity,minC=Infinity,maxC=-Infinity
+        for (const c of corners) {
+            const a=c.dot(f.widthAxis), cc=c.dot(f.semanticFacing)
+            if(a<minA)minA=a; if(a>maxA)maxA=a; if(cc<minC)minC=cc; if(cc>maxC)maxC=cc
+        }
+        console.log(`  part eid=${link.part.expressID} parent=${link.parentWallExpressID} A=[${(minA-originA).toFixed(2)},${(maxA-originA).toFixed(2)}] C=[${(minC-originC).toFixed(2)},${(maxC-originC).toFixed(2)}] name="${link.part.name ?? ''}"`)
     }
 
     console.log()

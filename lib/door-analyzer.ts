@@ -854,6 +854,12 @@ const ELECTRICAL_DEVICE_TYPES: ReadonlySet<string> = new Set([
     'IFCJUNCTIONBOX',
     'IFCELECTRICGENERATOR',
     'IFCFLOWTERMINAL',
+    'IFCCOMMUNICATIONSAPPLIANCE',
+    'IFCAUDIOVISUALAPPLIANCE',
+    'IFCALARM',
+    'IFCSENSOR',
+    'IFCCONTROLLER',
+    'IFCFIRESUPPRESSIONTERMINAL',
 ])
 
 function isElectricalDeviceType(typeName: string): boolean {
@@ -1768,8 +1774,8 @@ function findNearbyDevices(
     normal: THREE.Vector3,
     hostWall: ElementInfo | null,
     viewFrame: DoorViewFrame,
-    radius: number = 1.25,
-    limit: number = 8,
+    radius: number = 1.5,
+    limit: number = 32,
     elementStoreyElevationMap?: Map<number, number>,
     doorStoreyElevation?: number | null
 ): ElementInfo[] {
@@ -1781,8 +1787,12 @@ function findNearbyDevices(
     const upAxis = viewFrame.upAxis.clone().normalize()
     const doorBoundsInFrame = measureBoxInFrame(door.boundingBox, widthAxis, upAxis)
     const doorCenterA = (doorBoundsInFrame.minA + doorBoundsInFrame.maxA) / 2
-    const expandedDoorVerticalMin = doorBoundsInFrame.minB
-    const expandedDoorVerticalMax = doorBoundsInFrame.maxB
+    // Allow ceiling-mounted devices (KNX gateways, BMA sounders, presence sensors)
+    // up to 1 m above door head. v11 used a tight band so anything mounted higher
+    // than the door top was dropped — but the elec IFC explicitly anchors KNX nodes
+    // at ~2.5–3.0 m, well above a 2.1 m door.
+    const expandedDoorVerticalMin = doorBoundsInFrame.minB - 0.1
+    const expandedDoorVerticalMax = doorBoundsInFrame.maxB + 1.0
     const edgeBandThreshold = Math.max(viewFrame.width * 0.18, 0.24)
 
     // Storey filter: drop any device whose IfcBuildingStorey.Elevation differs
@@ -1828,7 +1838,10 @@ function findNearbyDevices(
             const intersectsHostWall = Boolean(hostWallBox?.intersectsBox(candidateBox))
             const inSameWallPlane = planeGap <= Math.max(0.6, halfDepthOnNormal + 0.2)
             const nearDoorJamb = distanceToNearestJamb <= edgeBandThreshold
-            const withinExtendedDoorBand = Math.abs(candidateCenterA - doorCenterA) <= Math.max(viewFrame.width * 0.6, 0.5)
+            // v11 used 0.6× door width — too tight for corridor-wide electrical
+            // clusters (intercom panels often centered between two doors). Bump
+            // to 1.2× door width; still bounded by the radius+plane checks.
+            const withinExtendedDoorBand = Math.abs(candidateCenterA - doorCenterA) <= Math.max(viewFrame.width * 1.2, 0.8)
             const shouldKeep =
                 overlapsDoorVerticalBand && (
                     (bboxGap <= radius && inSameWallPlane && (nearDoorJamb || intersectsHostWall || withinExtendedDoorBand))
@@ -1854,24 +1867,12 @@ function findNearbyDevices(
             || a.centerDistance - b.centerDistance
         )
 
-    const selected: typeof filtered = []
-    if (filtered.length > 0) {
-        selected.push(filtered[0])
-        const bestScore = filtered[0].score
-
-        for (let i = 1; i < filtered.length; i++) {
-            const current = filtered[i]
-            const previous = selected[selected.length - 1]
-            const scoreDelta = current.score - previous.score
-            const fromBest = current.score - bestScore
-            if (scoreDelta > 0.32 || fromBest > 0.45) {
-                break
-            }
-            selected.push(current)
-        }
-    }
-
-    return selected
+    // v11 had a score-window short-circuit that broke as soon as a "score gap"
+    // appeared between consecutive devices, which capped most corridor doors at
+    // 4–8 devices and silently dropped reviewer-flagged Bus-KNX / BMA / Sicherheit
+    // empty-boxes. Drop the cutoff — radius + plane + vertical-band gates already
+    // bound the candidate set. Keep `limit` as a pathological-model safety cap.
+    return filtered
         .slice(0, limit)
         .map((entry) => entry.device)
 }
@@ -2936,7 +2937,7 @@ function filterCoplanarPartMeshes(context: DoorContext, parts: THREE.Mesh[]): TH
 
     const hostDepth = measureDepth(host.boundingBox)
     const hostExtent = hostDepth.max - hostDepth.min
-    const tol = Math.max(hostExtent, 0.1)
+    const hostCenter = (hostDepth.max + hostDepth.min) / 2
     const out: THREE.Mesh[] = []
     for (const mesh of parts) {
         const geom = mesh.geometry as THREE.BufferGeometry | undefined
@@ -2947,13 +2948,27 @@ function filterCoplanarPartMeshes(context: DoorContext, parts: THREE.Mesh[]): TH
         mesh.updateMatrixWorld(true)
         const world = local.clone().applyMatrix4(mesh.matrixWorld)
         const partDepth = measureDepth(world)
-        // Drop if the part lies entirely outside the host wall's depth band
-        // (centre well off plane) OR its depth extent dwarfs the wall's.
         const partCenter = (partDepth.min + partDepth.max) / 2
-        const hostCenter = (hostDepth.min + hostDepth.max) / 2
-        if (Math.abs(partCenter - hostCenter) > tol) continue
         const partExtent = partDepth.max - partDepth.min
-        if (partExtent > Math.max(hostExtent * 3, 0.6)) continue
+
+        // KEEP the part if its bbox touches/overlaps the host's depth band
+        // (with a 5 cm fudge for floating-point slop). This is the test that
+        // legitimate stirnseite returns / wall end-cap parts pass — their
+        // bbox extends perpendicular but one face is flush against the host
+        // wall plane, so they overlap the host depth band.
+        const partOverlapsDepthBand = partDepth.min < hostDepth.max + 0.05
+            && partDepth.max > hostDepth.min - 0.05
+        if (!partOverlapsDepthBand) continue
+
+        // Drop ghost-mullion-style parts: those whose CENTER sits well off
+        // the host plane AND whose depth extent dwarfs the wall thickness
+        // (2Rm25Ks_f5J case — auxiliary mullion geometry that floats deep
+        // in the room while still touching the wall plane via a bbox seam).
+        const centerOffPlane = Math.abs(partCenter - hostCenter)
+        const isMullionGhost = centerOffPlane > Math.max(hostExtent * 1.5, 0.5)
+            && partExtent > Math.max(hostExtent * 4, 1.5)
+        if (isMullionGhost) continue
+
         out.push(mesh)
     }
     return out
